@@ -68,6 +68,7 @@ export type DocumentState = {
   stepLayer: (direction: number) => void
   setLayer: (layer: number) => void
   setLayerAndSelect: (layer: number, id: string) => void
+  reorderLayers: (orderedLayers: number[]) => void
   setLayerTitle: (layer: number, title: string) => void
   setTheme: (theme: Theme) => void
   toggleTheme: () => void
@@ -375,6 +376,37 @@ export const useDocumentStore = create<DocumentState>((set, get) => ({
         boxes: selectedBox ? [...boxes.filter((box) => box.id !== id), selectedBox] : boxes,
         activeLayer: layer,
         selectedBoxId: id,
+      }
+    })
+  },
+  reorderLayers: (orderedLayers) => {
+    set((state) => {
+      const uniqueLayers = [...new Set(orderedLayers)]
+
+      if (uniqueLayers.length < 2) {
+        return state
+      }
+
+      const layerSlots = [...uniqueLayers].sort((a, b) => b - a)
+      const layerMap = new Map(uniqueLayers.map((layer, index) => [layer, layerSlots[index]]))
+      const nextLayerTitles: Record<number, string> = {}
+
+      Object.entries(state.layerTitles).forEach(([layerKey, title]) => {
+        const layer = Number(layerKey)
+        nextLayerTitles[layerMap.get(layer) ?? layer] = title
+      })
+
+      return {
+        boxes: state.boxes.map((box) => ({
+          ...box,
+          layer: layerMap.get(box.layer) ?? box.layer,
+        })),
+        deletedBoxes: state.deletedBoxes.map((box) => ({
+          ...box,
+          layer: layerMap.get(box.layer) ?? box.layer,
+        })),
+        layerTitles: nextLayerTitles,
+        activeLayer: layerMap.get(state.activeLayer) ?? state.activeLayer,
       }
     })
   },

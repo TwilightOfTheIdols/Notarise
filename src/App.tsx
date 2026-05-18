@@ -102,6 +102,16 @@ type ConfirmationRequest = {
   onConfirm: () => void
 }
 
+type LayerDragState = {
+  layer: number
+  pointerId: number
+  startY: number
+  currentY: number
+  rowHeight: number
+  sourceOrder: number[]
+  visualOrder: number[]
+}
+
 const SEARCH_ANIMATION_DURATIONS: Record<SearchAnimationPreset, { min: number; max: number }> = {
   normal: { min: 400, max: 1800 },
   instant: { min: 0, max: 0 },
@@ -177,6 +187,7 @@ export function App() {
   const stepLayer = useDocumentStore((state) => state.stepLayer)
   const setLayer = useDocumentStore((state) => state.setLayer)
   const setLayerAndSelect = useDocumentStore((state) => state.setLayerAndSelect)
+  const reorderLayers = useDocumentStore((state) => state.reorderLayers)
   const setLayerTitle = useDocumentStore((state) => state.setLayerTitle)
   const setTheme = useDocumentStore((state) => state.setTheme)
   const updateSettings = useDocumentStore((state) => state.updateSettings)
@@ -223,6 +234,7 @@ export function App() {
     y: number
   } | null>(null)
   const [confirmationRequest, setConfirmationRequest] = useState<ConfirmationRequest | null>(null)
+  const [layerDrag, setLayerDrag] = useState<LayerDragState | null>(null)
 
   useDocumentPersistence()
 
@@ -298,12 +310,72 @@ export function App() {
     layerSet.add(activeLayer)
     return [...layerSet].sort((a, b) => b - a)
   }, [activeLayer, boxes, layerTitles])
+  const visualLayerDots = layerDrag?.visualOrder ?? visibleLayerDots
 
   const layerRenderPosition = visualLayer ?? activeLayer
   const visibleActiveLayer = Math.round(layerRenderPosition)
 
   const getLayerTitle = (layer: number) => {
     return layerTitles[layer]?.trim() || `Layer ${layer}`
+  }
+
+  const getLayerDragOrder = (drag: LayerDragState, clientY: number) => {
+    const draggedIndex = drag.sourceOrder.indexOf(drag.layer)
+
+    if (draggedIndex === -1) {
+      return drag.sourceOrder
+    }
+
+    const rowStep = Math.max(1, drag.rowHeight + 6)
+    const offsetRows = Math.round((clientY - drag.startY) / rowStep)
+    const targetIndex = Math.min(Math.max(draggedIndex + offsetRows, 0), drag.sourceOrder.length - 1)
+    const nextOrder = drag.sourceOrder.filter((layer) => layer !== drag.layer)
+    nextOrder.splice(targetIndex, 0, drag.layer)
+
+    return nextOrder
+  }
+
+  const startLayerDrag = (event: ReactPointerEvent<HTMLButtonElement>, layer: number) => {
+    event.preventDefault()
+    event.stopPropagation()
+    event.currentTarget.setPointerCapture(event.pointerId)
+    const rowHeight = event.currentTarget.getBoundingClientRect().height
+    setLayerDrag({
+      layer,
+      pointerId: event.pointerId,
+      startY: event.clientY,
+      currentY: event.clientY,
+      rowHeight,
+      sourceOrder: visibleLayerDots,
+      visualOrder: visibleLayerDots,
+    })
+  }
+
+  const moveLayerDrag = (event: ReactPointerEvent<HTMLButtonElement>) => {
+    if (!layerDrag || event.pointerId !== layerDrag.pointerId) {
+      return
+    }
+
+    const visualOrder = getLayerDragOrder(layerDrag, event.clientY)
+    setLayerDrag({
+      ...layerDrag,
+      currentY: event.clientY,
+      visualOrder,
+    })
+  }
+
+  const finishLayerDrag = (event: ReactPointerEvent<HTMLButtonElement>) => {
+    if (!layerDrag || event.pointerId !== layerDrag.pointerId) {
+      return
+    }
+
+    const visualOrder = getLayerDragOrder(layerDrag, event.clientY)
+    setLayerDrag(null)
+
+    if (visualOrder.join('|') !== layerDrag.sourceOrder.join('|')) {
+      reorderLayers(visualOrder)
+      setVisualLayer(null)
+    }
   }
 
   const isPointInTrash = (clientX: number, clientY: number) => {
@@ -1311,14 +1383,33 @@ export function App() {
         </button>
 
         <nav className="layer-rail" aria-label="Layers">
-          {visibleLayerDots.map((layer) => (
+          {visualLayerDots.map((layer) => {
+            const isDraggingLayer = layerDrag?.layer === layer
+            const dragOffset = isDraggingLayer ? layerDrag.currentY - layerDrag.startY : 0
+
+            return (
             <button
               key={layer}
-              className={`layer-dot ${layer === visibleActiveLayer ? 'is-active' : ''}`}
+              className={[
+                'layer-dot',
+                layer === visibleActiveLayer ? 'is-active' : '',
+                isDraggingLayer ? 'is-dragging' : '',
+              ].filter(Boolean).join(' ')}
               type="button"
               title={getLayerTitle(layer)}
               aria-label={`Go to ${getLayerTitle(layer)}`}
+              style={isDraggingLayer
+                ? { '--layer-drag-y': `${dragOffset}px` } as CSSProperties
+                : undefined}
+              onPointerDown={(event) => startLayerDrag(event, layer)}
+              onPointerMove={moveLayerDrag}
+              onPointerUp={finishLayerDrag}
+              onPointerCancel={finishLayerDrag}
               onClick={() => {
+                if (isDraggingLayer) {
+                  return
+                }
+
                 setVisualLayer(null)
                 setLayer(layer)
               }}
@@ -1326,7 +1417,8 @@ export function App() {
               <Circle size={13} strokeWidth={layer === visibleActiveLayer ? 4 : 2} />
               <span>{getLayerTitle(layer)}</span>
             </button>
-          ))}
+            )
+          })}
         </nav>
 
         <section

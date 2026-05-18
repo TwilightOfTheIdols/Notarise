@@ -124,7 +124,7 @@ export function GlobalSearch({ cells, getLayerTitle, onActivate, onResultSelect 
               >
                 <span className="global-search-layer">
                   <b>{cell.layer}</b>
-                  {layerTitle}
+                  <span className="global-search-layer-title">{layerTitle}</span>
                   {matchedLayer && <small>Layer</small>}
                 </span>
                 <span className="global-search-preview">{preview || 'Empty cell'}</span>
