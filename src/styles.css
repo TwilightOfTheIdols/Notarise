@@ -701,7 +701,6 @@ button {
   border-color: var(--text);
   background: color-mix(in srgb, var(--canvas-bg) 82%, transparent);
   cursor: grabbing;
-  transform: translate(18px, var(--layer-drag-y, 0));
   transition:
     background-color 120ms ease,
     border-color 120ms ease,

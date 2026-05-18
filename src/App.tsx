@@ -105,6 +105,7 @@ type ConfirmationRequest = {
 type LayerDragState = {
   layer: number
   pointerId: number
+  isDragging: boolean
   startY: number
   currentY: number
   rowHeight: number
@@ -310,7 +311,6 @@ export function App() {
     layerSet.add(activeLayer)
     return [...layerSet].sort((a, b) => b - a)
   }, [activeLayer, boxes, layerTitles])
-  const visualLayerDots = layerDrag?.visualOrder ?? visibleLayerDots
 
   const layerRenderPosition = visualLayer ?? activeLayer
   const visibleActiveLayer = Math.round(layerRenderPosition)
@@ -343,6 +343,7 @@ export function App() {
     setLayerDrag({
       layer,
       pointerId: event.pointerId,
+      isDragging: false,
       startY: event.clientY,
       currentY: event.clientY,
       rowHeight,
@@ -352,15 +353,20 @@ export function App() {
   }
 
   const moveLayerDrag = (event: ReactPointerEvent<HTMLButtonElement>) => {
-    if (!layerDrag || event.pointerId !== layerDrag.pointerId) {
-      return
-    }
+    setLayerDrag((drag) => {
+      if (!drag || event.pointerId !== drag.pointerId) {
+        return drag
+      }
 
-    const visualOrder = getLayerDragOrder(layerDrag, event.clientY)
-    setLayerDrag({
-      ...layerDrag,
-      currentY: event.clientY,
-      visualOrder,
+      const isDragging = drag.isDragging || Math.abs(event.clientY - drag.startY) >= CLICK_DRIFT
+      const visualOrder = isDragging ? getLayerDragOrder(drag, event.clientY) : drag.sourceOrder
+
+      return {
+        ...drag,
+        isDragging,
+        currentY: event.clientY,
+        visualOrder,
+      }
     })
   }
 
@@ -369,8 +375,15 @@ export function App() {
       return
     }
 
-    const visualOrder = getLayerDragOrder(layerDrag, event.clientY)
+    const visualOrder = layerDrag.isDragging ? getLayerDragOrder(layerDrag, event.clientY) : layerDrag.sourceOrder
+    const shouldSelectLayer = !layerDrag.isDragging
     setLayerDrag(null)
+
+    if (shouldSelectLayer) {
+      setVisualLayer(null)
+      setLayer(layerDrag.layer)
+      return
+    }
 
     if (visualOrder.join('|') !== layerDrag.sourceOrder.join('|')) {
       reorderLayers(visualOrder)
@@ -1383,9 +1396,19 @@ export function App() {
         </button>
 
         <nav className="layer-rail" aria-label="Layers">
-          {visualLayerDots.map((layer) => {
-            const isDraggingLayer = layerDrag?.layer === layer
-            const dragOffset = isDraggingLayer ? layerDrag.currentY - layerDrag.startY : 0
+          {visibleLayerDots.map((layer) => {
+            const isDraggingLayer = layerDrag?.isDragging && layerDrag.layer === layer
+            const sourceIndex = layerDrag?.sourceOrder.indexOf(layer) ?? -1
+            const visualIndex = layerDrag?.visualOrder.indexOf(layer) ?? -1
+            const rowStep = layerDrag ? Math.max(1, layerDrag.rowHeight + 6) : 0
+            const layerOffset = layerDrag?.isDragging
+              ? isDraggingLayer
+                ? layerDrag.currentY - layerDrag.startY
+                : sourceIndex >= 0 && visualIndex >= 0 ? (visualIndex - sourceIndex) * rowStep : 0
+              : 0
+            const layerStyle = layerDrag?.isDragging && (isDraggingLayer || layerOffset !== 0)
+              ? { transform: `translate(${isDraggingLayer ? 18 : 0}px, ${layerOffset}px)` } as CSSProperties
+              : undefined
 
             return (
             <button
@@ -1398,21 +1421,11 @@ export function App() {
               type="button"
               title={getLayerTitle(layer)}
               aria-label={`Go to ${getLayerTitle(layer)}`}
-              style={isDraggingLayer
-                ? { '--layer-drag-y': `${dragOffset}px` } as CSSProperties
-                : undefined}
+              style={layerStyle}
               onPointerDown={(event) => startLayerDrag(event, layer)}
               onPointerMove={moveLayerDrag}
               onPointerUp={finishLayerDrag}
               onPointerCancel={finishLayerDrag}
-              onClick={() => {
-                if (isDraggingLayer) {
-                  return
-                }
-
-                setVisualLayer(null)
-                setLayer(layer)
-              }}
             >
               <Circle size={13} strokeWidth={layer === visibleActiveLayer ? 4 : 2} />
               <span>{getLayerTitle(layer)}</span>
