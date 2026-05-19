@@ -7,7 +7,10 @@ export type SearchAnimationPreset = 'normal' | 'instant'
 
 export type DocumentSettings = {
   searchAnimationPreset: SearchAnimationPreset
-  cellOpacity: number
+  colorTemperature: number
+  layerPanDepth: number
+  backgroundLayerBrightness: number
+  backgroundLayerBlur: number
 }
 
 export type Viewport = {
@@ -73,6 +76,7 @@ export type DocumentState = {
   setTheme: (theme: Theme) => void
   toggleTheme: () => void
   updateSettings: (settings: Partial<DocumentSettings>) => void
+  resetSettings: () => void
   hydrateDocument: (document: NotariseDocument) => void
 }
 
@@ -86,7 +90,10 @@ const MAX_ZOOM = 2
 const ZOOM_STEP = 0.1
 const DEFAULT_SETTINGS: DocumentSettings = {
   searchAnimationPreset: 'normal',
-  cellOpacity: 0,
+  colorTemperature: 0,
+  layerPanDepth: 2.5,
+  backgroundLayerBrightness: 80,
+  backgroundLayerBlur: 4,
 }
 
 const blankContent: JSONContent = {
@@ -112,17 +119,41 @@ const cloneContent = (content: JSONContent): JSONContent => {
     : JSON.parse(JSON.stringify(content)) as JSONContent
 }
 
-const normalizeSettings = (settings: Partial<DocumentSettings> = {}): DocumentSettings => {
+type LegacySettings = Partial<DocumentSettings> & {
+  paletteId?: unknown
+}
+
+const normalizeSettings = (settings: LegacySettings = {}): DocumentSettings => {
   const searchAnimationPreset = settings.searchAnimationPreset === 'instant'
     ? settings.searchAnimationPreset
     : DEFAULT_SETTINGS.searchAnimationPreset
+  const legacyTemperature = settings.paletteId === 'cream' ? 100 : DEFAULT_SETTINGS.colorTemperature
 
   return {
     searchAnimationPreset,
-    cellOpacity: clamp(
-      Number.isFinite(settings.cellOpacity) ? Number(settings.cellOpacity) : DEFAULT_SETTINGS.cellOpacity,
+    colorTemperature: clamp(
+      Number.isFinite(settings.colorTemperature) ? Number(settings.colorTemperature) : legacyTemperature,
       0,
       100,
+    ),
+    layerPanDepth: clamp(
+      Number.isFinite(settings.layerPanDepth) ? Number(settings.layerPanDepth) : DEFAULT_SETTINGS.layerPanDepth,
+      0,
+      5,
+    ),
+    backgroundLayerBrightness: clamp(
+      Number.isFinite(settings.backgroundLayerBrightness)
+        ? Number(settings.backgroundLayerBrightness)
+        : DEFAULT_SETTINGS.backgroundLayerBrightness,
+      0,
+      100,
+    ),
+    backgroundLayerBlur: clamp(
+      Number.isFinite(settings.backgroundLayerBlur)
+        ? Number(settings.backgroundLayerBlur)
+        : DEFAULT_SETTINGS.backgroundLayerBlur,
+      0,
+      10,
     ),
   }
 }
@@ -139,6 +170,44 @@ const removeEmptySelectedCell = (state: DocumentState) => {
   }
 
   return state.boxes.filter((box) => box.id !== state.selectedBoxId)
+}
+
+const getContentLayers = (state: Pick<DocumentState, 'boxes' | 'layerTitles'>, boxes = state.boxes) => {
+  const layers = new Set<number>()
+
+  boxes.forEach((box) => layers.add(box.layer))
+  Object.entries(state.layerTitles).forEach(([layer, title]) => {
+    if (title.trim()) {
+      layers.add(Number(layer))
+    }
+  })
+
+  return [...layers]
+}
+
+const getLayerBounds = (state: Pick<DocumentState, 'boxes' | 'layerTitles' | 'activeLayer'>, boxes = state.boxes) => {
+  const layers = getContentLayers(state, boxes)
+
+  if (layers.length === 0) {
+    return {
+      bottom: state.activeLayer,
+      top: state.activeLayer,
+    }
+  }
+
+  return {
+    bottom: Math.min(...layers),
+    top: Math.max(...layers),
+  }
+}
+
+const clampNavigableLayer = (
+  layer: number,
+  state: Pick<DocumentState, 'boxes' | 'layerTitles' | 'activeLayer'>,
+  boxes = state.boxes,
+) => {
+  const bounds = getLayerBounds(state, boxes)
+  return clamp(layer, bounds.bottom - 1, bounds.top + 1)
 }
 
 export const createDocumentSnapshot = (state: DocumentState): NotariseDocument => ({
@@ -354,18 +423,26 @@ export const useDocumentStore = create<DocumentState>((set, get) => ({
     })
   },
   stepLayer: (direction) => {
-    set((state) => ({
-      boxes: removeEmptySelectedCell(state),
-      activeLayer: state.activeLayer + direction,
-      selectedBoxId: null,
-    }))
+    set((state) => {
+      const boxes = removeEmptySelectedCell(state)
+
+      return {
+        boxes,
+        activeLayer: clampNavigableLayer(state.activeLayer + direction, state, boxes),
+        selectedBoxId: null,
+      }
+    })
   },
   setLayer: (layer) => {
-    set((state) => ({
-      boxes: removeEmptySelectedCell(state),
-      activeLayer: layer,
-      selectedBoxId: null,
-    }))
+    set((state) => {
+      const boxes = removeEmptySelectedCell(state)
+
+      return {
+        boxes,
+        activeLayer: clampNavigableLayer(layer, state, boxes),
+        selectedBoxId: null,
+      }
+    })
   },
   setLayerAndSelect: (layer, id) => {
     set((state) => {
@@ -387,7 +464,8 @@ export const useDocumentStore = create<DocumentState>((set, get) => ({
         return state
       }
 
-      const layerSlots = [...uniqueLayers].sort((a, b) => b - a)
+      const topLayer = Math.max(...uniqueLayers)
+      const layerSlots = uniqueLayers.map((_, index) => topLayer - index)
       const layerMap = new Map(uniqueLayers.map((layer, index) => [layer, layerSlots[index]]))
       const nextLayerTitles: Record<number, string> = {}
 
@@ -434,12 +512,23 @@ export const useDocumentStore = create<DocumentState>((set, get) => ({
       }),
     }))
   },
+  resetSettings: () => {
+    set({ settings: DEFAULT_SETTINGS })
+  },
   hydrateDocument: (document) => {
-    set({
-      boxes: document.boxes ?? [],
-      deletedBoxes: document.storage ?? [],
-      layerTitles: document.layerTitles ?? {},
+    const boxes = document.boxes ?? []
+    const layerTitles = document.layerTitles ?? {}
+    const activeLayer = clampNavigableLayer(document.activeLayer ?? 1, {
+      boxes,
+      layerTitles,
       activeLayer: document.activeLayer ?? 1,
+    })
+
+    set({
+      boxes,
+      deletedBoxes: document.storage ?? [],
+      layerTitles,
+      activeLayer,
       viewport: document.viewport ?? { x: 120, y: 96, zoom: 1 },
       theme: document.theme ?? 'light',
       settings: normalizeSettings(document.settings),

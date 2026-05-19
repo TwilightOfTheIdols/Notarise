@@ -3,9 +3,10 @@ type TextSizeWheelPickerProps = {
   y: number
   height: number
   rotation: number
+  isExiting?: boolean
 }
 
-export function TextSizeWheelPicker({ x, y, height, rotation }: TextSizeWheelPickerProps) {
+export function TextSizeWheelPicker({ x, y, height, rotation, isExiting }: TextSizeWheelPickerProps) {
   const tickCount = 18
   const aspectRatio = 4
   const radius = height * 1.43
@@ -14,7 +15,7 @@ export function TextSizeWheelPicker({ x, y, height, rotation }: TextSizeWheelPic
 
   return (
     <div
-      className="text-size-wheel-picker"
+      className={`text-size-wheel-picker ${isExiting ? 'is-exiting' : ''}`}
       style={{
         left: x,
         top: y,

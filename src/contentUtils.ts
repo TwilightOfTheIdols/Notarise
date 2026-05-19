@@ -9,6 +9,15 @@ export function extractTextPreview(value: unknown): string {
   return text.length > 96 ? `${text.slice(0, 96).trim()}...` : text
 }
 
+export function getContentSummary(value: unknown): { text: string; preview: string } {
+  const text = getContentText(value)
+  const preview = !text && hasImageContent(value)
+    ? 'Image box'
+    : text.length > 96 ? `${text.slice(0, 96).trim()}...` : text
+
+  return { text, preview }
+}
+
 export function getContentText(value: unknown): string {
   return collectText(value).replace(/\s+/g, ' ').trim()
 }

@@ -1,8 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { CSSProperties, PointerEvent as ReactPointerEvent } from 'react'
-import { EditorContent, useEditor } from '@tiptap/react'
+import type { PointerEvent as ReactPointerEvent } from 'react'
 import type { Editor } from '@tiptap/react'
-import { Circle, Grip, Maximize2, Package, PackageOpen, ScrollText, Settings, Trash2, Type } from 'lucide-react'
+import { Package, PackageOpen, ScrollText, Settings } from 'lucide-react'
 import {
   CELL_CONTROL_INSET,
   CLICK_DRIFT,
@@ -18,6 +17,7 @@ import {
 } from './constants'
 import {
   applyScaledFontSegments,
+  clampFontSize,
   captureDocumentFontSegments,
   captureSelectedRowFontSegments,
   clampIndex,
@@ -25,20 +25,22 @@ import {
   getMinShrinkStepIndex,
   getNearestFontStepIndex,
   getWeightedSegmentFontSize,
-  handleListDeletionKey,
-  preserveFontSizeAfterEnter,
-  startImageResizeCorrection,
 } from './editorBehaviors'
 import type { FontSizeSegment } from './editorBehaviors'
-import { createEditorExtensions } from './editorConfig'
 import { createImageDocumentContent, getImageFilesFromClipboard, isEmptyDocumentContent, readFileAsDataUrl } from './contentUtils'
 import { DeletedTextPanel, StorageDragPreview } from './StoragePanel'
 import { TextSizeWheelPicker } from './TextSizeWheel'
 import { GlobalSearch } from './GlobalSearch'
 import { SettingsPanel } from './SettingsPanel'
+import { CanvasTextBox } from './CanvasTextBox'
+import { ConfirmationDialog } from './ConfirmationDialog'
+import type { ConfirmationRequest } from './ConfirmationDialog'
+import { LayerRail } from './LayerRail'
+import type { LayerDragState, LayerReleaseState } from './LayerRail'
 import { useDocumentPersistence } from './useDocumentPersistence'
 import { createDocumentSnapshot, useDocumentStore, screenToWorld } from './store'
 import type { CellModel, DocumentSettings, NotariseDocument, SearchAnimationPreset, StoredCellModel } from './store'
+import { getTemperatureColors, rgbTriplet } from './palettes'
 
 type DragMode =
   | null
@@ -95,28 +97,65 @@ type PressState = {
   timer: number
 } | null
 
-type ConfirmationRequest = {
-  title: string
-  message?: string
-  confirmLabel: string
-  onConfirm: () => void
+type FontSizeRowLabel = {
+  id: string
+  boxId: string
+  x: number
+  y: number
+  size: number
 }
 
-type LayerDragState = {
-  layer: number
-  pointerId: number
-  isDragging: boolean
-  startY: number
-  currentY: number
-  rowHeight: number
-  sourceOrder: number[]
-  visualOrder: number[]
+type TextSizeDialState = {
+  boxId: string
+  x: number
+  y: number
+  height: number
+  rotation: number
+  isExiting?: boolean
 }
 
 const SEARCH_ANIMATION_DURATIONS: Record<SearchAnimationPreset, { min: number; max: number }> = {
   normal: { min: 400, max: 1800 },
   instant: { min: 0, max: 0 },
 }
+
+const TEXT_SIZE_UI_FADE_MS = 160
+const CONFIRMATION_UI_FADE_MS = 220
+const DOT_MATRIX_FADE_MS = 260
+const SEARCH_SETTLE_MS = 520
+const CSS_EASE = (() => {
+  const x1 = 0.25
+  const y1 = 0.1
+  const x2 = 0.25
+  const y2 = 1
+  const cx = 3 * x1
+  const bx = 3 * (x2 - x1) - cx
+  const ax = 1 - cx - bx
+  const cy = 3 * y1
+  const by = 3 * (y2 - y1) - cy
+  const ay = 1 - cy - by
+
+  const sampleX = (time: number) => ((ax * time + bx) * time + cx) * time
+  const sampleY = (time: number) => ((ay * time + by) * time + cy) * time
+  const sampleDerivativeX = (time: number) => (3 * ax * time + 2 * bx) * time + cx
+
+  return (progress: number) => {
+    let time = progress
+
+    for (let index = 0; index < 5; index += 1) {
+      const x = sampleX(time) - progress
+      const derivative = sampleDerivativeX(time)
+
+      if (Math.abs(x) < 0.0001 || Math.abs(derivative) < 0.0001) {
+        break
+      }
+
+      time -= x / derivative
+    }
+
+    return sampleY(Math.min(1, Math.max(0, time)))
+  }
+})()
 
 const getSearchJumpDuration = (
   startViewport: { x: number; y: number },
@@ -169,6 +208,63 @@ const readTextFile = (file: File) => {
   })
 }
 
+const getOrderedLayerMap = (orderedLayers: number[]) => {
+  const uniqueLayers = [...new Set(orderedLayers)]
+
+  if (uniqueLayers.length === 0) {
+    return new Map<number, number>()
+  }
+
+  const topLayer = Math.max(...uniqueLayers)
+  return new Map(uniqueLayers.map((layer, index) => [layer, topLayer - index]))
+}
+
+const snapToDevicePixel = (value: number) => {
+  const ratio = window.devicePixelRatio || 1
+  return Math.round(value * ratio) / ratio
+}
+
+const getFontStepIndexForOffset = (referenceSize: number, offset: number) => {
+  if (offset === 0) {
+    return getNearestFontStepIndex(referenceSize)
+  }
+
+  if (offset > 0) {
+    const largerStepIndex = FONT_SIZE_STEPS.findIndex((size) => size > referenceSize)
+    return largerStepIndex === -1
+      ? FONT_SIZE_STEPS.length - 1
+      : clampIndex(largerStepIndex + offset - 1, FONT_SIZE_STEPS)
+  }
+
+  const smallerStepIndex = FONT_SIZE_STEPS.findLastIndex((size) => size < referenceSize)
+  return smallerStepIndex === -1
+    ? 0
+    : clampIndex(smallerStepIndex + offset + 1, FONT_SIZE_STEPS)
+}
+
+const getFontStepOffsetForIndex = (referenceSize: number, stepIndex: number) => {
+  const stepSize = FONT_SIZE_STEPS[stepIndex]
+
+  if (stepSize > referenceSize) {
+    return FONT_SIZE_STEPS.filter((size) => size > referenceSize && size <= stepSize).length
+  }
+
+  if (stepSize < referenceSize) {
+    return -FONT_SIZE_STEPS.filter((size) => size < referenceSize && size >= stepSize).length
+  }
+
+  return 0
+}
+
+const getCurrentEditorRowFontSize = (editor: Editor, rowPos: number, fallbackSize: number) => {
+  const rowNode = editor.state.doc.nodeAt(rowPos)
+  const rowSize = Number(rowNode?.attrs.fontSize)
+
+  return Number.isFinite(rowSize) && rowSize > 0
+    ? clampFontSize(rowSize)
+    : clampFontSize(fallbackSize)
+}
+
 export function App() {
   const boxes = useDocumentStore((state) => state.boxes)
   const deletedBoxes = useDocumentStore((state) => state.deletedBoxes)
@@ -192,6 +288,7 @@ export function App() {
   const setLayerTitle = useDocumentStore((state) => state.setLayerTitle)
   const setTheme = useDocumentStore((state) => state.setTheme)
   const updateSettings = useDocumentStore((state) => state.updateSettings)
+  const resetSettings = useDocumentStore((state) => state.resetSettings)
   const updateBox = useDocumentStore((state) => state.updateBox)
   const deleteBox = useDocumentStore((state) => state.deleteBox)
   const removeBox = useDocumentStore((state) => state.removeBox)
@@ -212,8 +309,14 @@ export function App() {
   const movementTimerRef = useRef<number | null>(null)
   const originAnimationRef = useRef<number | null>(null)
   const searchJumpAnimationRef = useRef<number | null>(null)
+  const searchBrightnessReleaseRef = useRef<number | null>(null)
+  const searchBrightnessReleaseTimerRef = useRef<number | null>(null)
   const textSizeWheelTimerRef = useRef<number | null>(null)
+  const textSizeWheelExitTimerRef = useRef<number | null>(null)
   const textSizeWheelRotationRef = useRef(0)
+  const textSizeWheelDeltaRef = useRef(0)
+  const fontSizeLabelFrameRef = useRef<number | null>(null)
+  const layerReleaseFrameRef = useRef<number | null>(null)
   const [isPanning, setIsPanning] = useState(false)
   const [isCanvasMoving, setIsCanvasMoving] = useState(false)
   const [isSearchJumping, setIsSearchJumping] = useState(false)
@@ -222,13 +325,7 @@ export function App() {
   const [isSettingsOpen, setIsSettingsOpen] = useState(false)
   const [visualLayer, setVisualLayer] = useState<number | null>(null)
   const [workspaceSize, setWorkspaceSize] = useState({ width: 0, height: 0 })
-  const [textSizeDial, setTextSizeDial] = useState<{
-    boxId: string
-    x: number
-    y: number
-    height: number
-    rotation: number
-  } | null>(null)
+  const [textSizeDial, setTextSizeDial] = useState<TextSizeDialState | null>(null)
   const [storageDragPreview, setStorageDragPreview] = useState<{
     boxId: string
     x: number
@@ -236,12 +333,36 @@ export function App() {
   } | null>(null)
   const [confirmationRequest, setConfirmationRequest] = useState<ConfirmationRequest | null>(null)
   const [layerDrag, setLayerDrag] = useState<LayerDragState | null>(null)
+  const [layerRelease, setLayerRelease] = useState<LayerReleaseState | null>(null)
+  const [fontSizeRowLabels, setFontSizeRowLabels] = useState<FontSizeRowLabel[]>([])
+  const [searchBrightnessPulse, setSearchBrightnessPulse] = useState(0)
+  const [searchFocusLayer, setSearchFocusLayer] = useState<number | null>(null)
 
   useDocumentPersistence()
 
   useEffect(() => {
-    document.documentElement.dataset.theme = theme
-  }, [theme])
+    const root = document.documentElement
+    const colors = getTemperatureColors(theme, settings.colorTemperature)
+    const textRgb = rgbTriplet(colors.text)
+    const trimRgb = rgbTriplet(colors.trim)
+
+    root.dataset.theme = theme
+    root.style.setProperty('--canvas-bg', colors.canvas)
+    root.style.setProperty('--canvas-bg-rgb', rgbTriplet(colors.canvas))
+    root.style.setProperty('--text', colors.text)
+    root.style.setProperty('--text-rgb', textRgb)
+    root.style.setProperty('--cell-bg', colors.cell)
+    root.style.setProperty('--cell-bg-rgb', rgbTriplet(colors.cell))
+    root.style.setProperty('--trim', colors.trim)
+    root.style.setProperty('--trim-rgb', trimRgb)
+    root.style.setProperty('--muted', `rgb(${textRgb} / ${theme === 'dark' ? 0.62 : 0.58})`)
+    root.style.setProperty('--faint', `rgb(${textRgb} / ${theme === 'dark' ? 0.14 : 0.12})`)
+    root.style.setProperty('--hairline', `rgb(${trimRgb} / ${theme === 'dark' ? 0.16 : 0.12})`)
+    root.style.setProperty('--active-line', `rgb(${trimRgb} / ${theme === 'dark' ? 0.42 : 0.34})`)
+    root.style.setProperty('--control-bg', `rgb(${trimRgb} / ${theme === 'dark' ? 0.12 : 0.075})`)
+    root.style.setProperty('--control-hover', `rgb(${trimRgb} / ${theme === 'dark' ? 0.2 : 0.13})`)
+    root.style.setProperty('--dot-color', `rgb(${trimRgb} / ${theme === 'dark' ? 0.44 : 0.36})`)
+  }, [settings.colorTemperature, theme])
 
   useEffect(() => {
     if (!confirmationRequest) {
@@ -269,11 +390,27 @@ export function App() {
       if (originAnimationRef.current !== null) {
         window.cancelAnimationFrame(originAnimationRef.current)
       }
-    if (searchJumpAnimationRef.current !== null) {
-      window.cancelAnimationFrame(searchJumpAnimationRef.current)
-    }
+      if (searchJumpAnimationRef.current !== null) {
+        window.cancelAnimationFrame(searchJumpAnimationRef.current)
+      }
+      if (searchBrightnessReleaseRef.current !== null) {
+        window.cancelAnimationFrame(searchBrightnessReleaseRef.current)
+      }
+      if (searchBrightnessReleaseTimerRef.current !== null) {
+        window.clearTimeout(searchBrightnessReleaseTimerRef.current)
+      }
       if (textSizeWheelTimerRef.current !== null) {
         window.clearTimeout(textSizeWheelTimerRef.current)
+      }
+      if (textSizeWheelExitTimerRef.current !== null) {
+        window.clearTimeout(textSizeWheelExitTimerRef.current)
+      }
+      textSizeWheelDeltaRef.current = 0
+      if (fontSizeLabelFrameRef.current !== null) {
+        window.cancelAnimationFrame(fontSizeLabelFrameRef.current)
+      }
+      if (layerReleaseFrameRef.current !== null) {
+        window.cancelAnimationFrame(layerReleaseFrameRef.current)
       }
     }
   }, [])
@@ -306,40 +443,81 @@ export function App() {
   const visibleLayerDots = useMemo(() => {
     const layerSet = new Set(boxes.map((box) => box.layer))
     Object.keys(layerTitles).forEach((layer) => {
-      layerSet.add(Number(layer))
+      if (layerTitles[Number(layer)]?.trim()) {
+        layerSet.add(Number(layer))
+      }
     })
     layerSet.add(activeLayer)
     return [...layerSet].sort((a, b) => b - a)
   }, [activeLayer, boxes, layerTitles])
 
-  const layerRenderPosition = visualLayer ?? activeLayer
-  const visibleActiveLayer = Math.round(layerRenderPosition)
+  const layerBounds = useMemo(() => {
+    const layerSet = new Set(boxes.map((box) => box.layer))
+    Object.entries(layerTitles).forEach(([layer, title]) => {
+      if (title.trim()) {
+        layerSet.add(Number(layer))
+      }
+    })
+    const layers = [...layerSet]
 
-  const getLayerTitle = (layer: number) => {
-    return layerTitles[layer]?.trim() || `Layer ${layer}`
-  }
-
-  const getLayerDragOrder = (drag: LayerDragState, clientY: number) => {
-    const draggedIndex = drag.sourceOrder.indexOf(drag.layer)
-
-    if (draggedIndex === -1) {
-      return drag.sourceOrder
+    if (layers.length === 0) {
+      return { bottom: activeLayer, top: activeLayer }
     }
 
+    return {
+      bottom: Math.min(...layers),
+      top: Math.max(...layers),
+    }
+  }, [activeLayer, boxes, layerTitles])
+
+  const clampNavigableLayer = (layer: number) => {
+    return Math.min(Math.max(layer, layerBounds.bottom - 1), layerBounds.top + 1)
+  }
+
+  const layerRenderPosition = visualLayer ?? activeLayer
+  const visibleActiveLayer = Math.round(layerRenderPosition)
+  const frontLayer = visualLayer === null ? activeLayer : visibleActiveLayer
+
+  const getLayerTitle = useCallback((layer: number) => {
+    return layerTitles[layer]?.trim() || `Layer ${layer}`
+  }, [layerTitles])
+
+  const getLayerDragTargetIndex = (drag: LayerDragState, clientY: number) => {
     const rowStep = Math.max(1, drag.rowHeight + 6)
-    const offsetRows = Math.round((clientY - drag.startY) / rowStep)
-    const targetIndex = Math.min(Math.max(draggedIndex + offsetRows, 0), drag.sourceOrder.length - 1)
+    const draggedCenterY = drag.sourceIndex * rowStep + (clientY - drag.startY) + drag.rowHeight / 2
+    const targetIndex = Math.floor(draggedCenterY / rowStep)
+
+    return Math.min(Math.max(targetIndex, 0), drag.sourceOrder.length - 1)
+  }
+
+  const getLayerDragOrder = (drag: LayerDragState, targetIndex = drag.targetIndex) => {
     const nextOrder = drag.sourceOrder.filter((layer) => layer !== drag.layer)
     nextOrder.splice(targetIndex, 0, drag.layer)
 
     return nextOrder
   }
 
+  const layerPreviewMap = layerDrag?.isDragging
+    ? getOrderedLayerMap(getLayerDragOrder(layerDrag))
+    : null
+  const visualLayerRenderPosition = layerPreviewMap?.get(layerRenderPosition) ?? layerRenderPosition
+
   const startLayerDrag = (event: ReactPointerEvent<HTMLButtonElement>, layer: number) => {
     event.preventDefault()
     event.stopPropagation()
     event.currentTarget.setPointerCapture(event.pointerId)
+    if (layerReleaseFrameRef.current !== null) {
+      window.cancelAnimationFrame(layerReleaseFrameRef.current)
+      layerReleaseFrameRef.current = null
+    }
+    setLayerRelease(null)
     const rowHeight = event.currentTarget.getBoundingClientRect().height
+    const sourceIndex = visibleLayerDots.indexOf(layer)
+
+    if (sourceIndex === -1) {
+      return
+    }
+
     setLayerDrag({
       layer,
       pointerId: event.pointerId,
@@ -347,8 +525,9 @@ export function App() {
       startY: event.clientY,
       currentY: event.clientY,
       rowHeight,
+      sourceIndex,
+      targetIndex: sourceIndex,
       sourceOrder: visibleLayerDots,
-      visualOrder: visibleLayerDots,
     })
   }
 
@@ -359,13 +538,13 @@ export function App() {
       }
 
       const isDragging = drag.isDragging || Math.abs(event.clientY - drag.startY) >= CLICK_DRIFT
-      const visualOrder = isDragging ? getLayerDragOrder(drag, event.clientY) : drag.sourceOrder
+      const targetIndex = isDragging ? getLayerDragTargetIndex(drag, event.clientY) : drag.sourceIndex
 
       return {
         ...drag,
         isDragging,
         currentY: event.clientY,
-        visualOrder,
+        targetIndex,
       }
     })
   }
@@ -375,7 +554,8 @@ export function App() {
       return
     }
 
-    const visualOrder = layerDrag.isDragging ? getLayerDragOrder(layerDrag, event.clientY) : layerDrag.sourceOrder
+    const targetIndex = layerDrag.isDragging ? getLayerDragTargetIndex(layerDrag, event.clientY) : layerDrag.sourceIndex
+    const visualOrder = layerDrag.isDragging ? getLayerDragOrder(layerDrag, targetIndex) : layerDrag.sourceOrder
     const shouldSelectLayer = !layerDrag.isDragging
     setLayerDrag(null)
 
@@ -386,8 +566,17 @@ export function App() {
     }
 
     if (visualOrder.join('|') !== layerDrag.sourceOrder.join('|')) {
+      const reorderedLayer = getOrderedLayerMap(visualOrder).get(layerDrag.layer) ?? layerDrag.layer
+      setLayerRelease({ layer: reorderedLayer, phase: 'hold' })
       reorderLayers(visualOrder)
       setVisualLayer(null)
+      layerReleaseFrameRef.current = window.requestAnimationFrame(() => {
+        setLayerRelease({ layer: reorderedLayer, phase: 'settle' })
+        layerReleaseFrameRef.current = window.requestAnimationFrame(() => {
+          setLayerRelease(null)
+          layerReleaseFrameRef.current = null
+        })
+      })
     }
   }
 
@@ -470,6 +659,99 @@ export function App() {
     }, viewport)
     const id = createBoxWithContent(point, createImageDocumentContent(dataUrls))
     focusCellEditor(id)
+  }
+
+  const showTextSizeDial = (dial: Omit<TextSizeDialState, 'isExiting'>) => {
+    if (textSizeWheelTimerRef.current !== null) {
+      window.clearTimeout(textSizeWheelTimerRef.current)
+      textSizeWheelTimerRef.current = null
+    }
+    if (textSizeWheelExitTimerRef.current !== null) {
+      window.clearTimeout(textSizeWheelExitTimerRef.current)
+      textSizeWheelExitTimerRef.current = null
+    }
+
+    setTextSizeDial({ ...dial, isExiting: false })
+  }
+
+  const scheduleTextSizeUiHide = (delay = 520) => {
+    if (textSizeWheelTimerRef.current !== null) {
+      window.clearTimeout(textSizeWheelTimerRef.current)
+    }
+    if (textSizeWheelExitTimerRef.current !== null) {
+      window.clearTimeout(textSizeWheelExitTimerRef.current)
+      textSizeWheelExitTimerRef.current = null
+    }
+
+    textSizeWheelTimerRef.current = window.setTimeout(() => {
+      setTextSizeDial((dial) => dial ? { ...dial, isExiting: true } : dial)
+      textSizeWheelTimerRef.current = null
+
+      textSizeWheelExitTimerRef.current = window.setTimeout(() => {
+        setTextSizeDial(null)
+        setFontSizeRowLabels([])
+        textSizeWheelExitTimerRef.current = null
+      }, TEXT_SIZE_UI_FADE_MS)
+    }, delay)
+  }
+
+  const showFontSizeRowLabels = (
+    boxId: string,
+    editor: Editor,
+    segments: FontSizeSegment[],
+    scale: number,
+  ) => {
+    if (fontSizeLabelFrameRef.current !== null) {
+      window.cancelAnimationFrame(fontSizeLabelFrameRef.current)
+    }
+
+    fontSizeLabelFrameRef.current = window.requestAnimationFrame(() => {
+      const rowGroups = new Map<number, {
+        from: number
+        sizeTotal: number
+        length: number
+      }>()
+
+      segments.forEach((segment) => {
+        const length = Math.max(1, segment.to - segment.from)
+        const existing = rowGroups.get(segment.rowPos)
+
+        if (existing) {
+          existing.sizeTotal += segment.size * length
+          existing.length += length
+          return
+        }
+
+        rowGroups.set(segment.rowPos, {
+          from: segment.rowFrom,
+          sizeTotal: segment.size * length,
+          length,
+        })
+      })
+
+      const labels = [...rowGroups.entries()].flatMap(([rowPos, row]) => {
+        try {
+          const coords = editor.view.coordsAtPos(Math.min(row.from, editor.state.doc.content.size))
+          const editorBox = editor.view.dom.getBoundingClientRect()
+          const baseSize = row.length > 0 ? row.sizeTotal / row.length : 0
+          const predictedSize = clampFontSize(baseSize * scale)
+          const size = getCurrentEditorRowFontSize(editor, rowPos, predictedSize)
+
+          return [{
+            id: `${boxId}:${rowPos}`,
+            boxId,
+            x: editorBox.left - 10,
+            y: (coords.top + coords.bottom) / 2,
+            size,
+          }]
+        } catch {
+          return []
+        }
+      })
+
+      setFontSizeRowLabels(labels)
+      fontSizeLabelFrameRef.current = null
+    })
   }
 
   const cloneCellForUndo = (box: CellModel): CellModel => ({
@@ -572,6 +854,14 @@ export function App() {
     setIsPanning(true)
   }
 
+  const startCanvasPanFromPointer = (event: ReactPointerEvent<HTMLElement>) => {
+    event.preventDefault()
+    event.stopPropagation()
+    rememberCanvasPoint(event.clientX, event.clientY)
+    deselectCurrentBox()
+    startCanvasPan(event.pointerId, event.clientX, event.clientY)
+  }
+
   const moveActiveDrag = (clientX: number, clientY: number) => {
     const drag = dragRef.current
 
@@ -618,17 +908,19 @@ export function App() {
     if (drag?.type === 'scale') {
       const dx = clientX - drag.startX
       const stepOffset = Math.round(dx / SIZE_PICKER_STEP_PX)
-      const rawStepIndex = clampIndex(drag.startStepIndex + stepOffset, FONT_SIZE_STEPS)
+      const rawStepIndex = getFontStepIndexForOffset(drag.referenceSize, stepOffset)
       const minShrinkStepIndex = getMinShrinkStepIndex(drag.referenceSize, drag.textSegments)
       const maxGrowStepIndex = getMaxGrowStepIndex(drag.referenceSize, drag.textSegments)
       const stepIndex = Math.min(Math.max(rawStepIndex, minShrinkStepIndex), maxGrowStepIndex)
       const fontSize = FONT_SIZE_STEPS[stepIndex]
-      const scale = fontSize / drag.referenceSize
-      const minShrinkDx = (minShrinkStepIndex - drag.startStepIndex) * SIZE_PICKER_STEP_PX
-      const maxGrowDx = (maxGrowStepIndex - drag.startStepIndex) * SIZE_PICKER_STEP_PX
+      const clampedStepOffset = getFontStepOffsetForIndex(drag.referenceSize, stepIndex)
+      const movedSteps = clampedStepOffset !== 0
+      const scale = movedSteps ? fontSize / drag.referenceSize : 1
+      const minShrinkDx = getFontStepOffsetForIndex(drag.referenceSize, minShrinkStepIndex) * SIZE_PICKER_STEP_PX
+      const maxGrowDx = getFontStepOffsetForIndex(drag.referenceSize, maxGrowStepIndex) * SIZE_PICKER_STEP_PX
       const visualDx = Math.min(Math.max(dx, minShrinkDx), maxGrowDx)
 
-      setTextSizeDial({
+      showTextSizeDial({
         boxId: drag.boxId,
         x: drag.controlX,
         y: drag.controlY,
@@ -637,10 +929,13 @@ export function App() {
       })
 
       if (drag.editor && drag.textSegments.length > 0) {
-        applyScaledFontSegments(drag.editor, drag.textSegments, scale)
+        if (movedSteps) {
+          applyScaledFontSegments(drag.editor, drag.textSegments, scale)
+        }
+        showFontSizeRowLabels(drag.boxId, drag.editor, drag.textSegments, scale)
       }
 
-      if (drag.scaleBoxDefault || drag.textSegments.length === 0) {
+      if (movedSteps && (drag.scaleBoxDefault || drag.textSegments.length === 0)) {
         updateBox(drag.boxId, { fontSize })
       }
       return
@@ -659,7 +954,7 @@ export function App() {
     dragRef.current = null
     setIsPanning(false)
     setIsTrashHot(false)
-    setTextSizeDial(null)
+    scheduleTextSizeUiHide(0)
     setStorageDragPreview(null)
 
     if (drag.type === 'canvas' || drag.type === 'box') {
@@ -691,6 +986,57 @@ export function App() {
     }, delay)
   }
 
+  const stopSearchBrightnessRelease = () => {
+    if (searchBrightnessReleaseTimerRef.current !== null) {
+      window.clearTimeout(searchBrightnessReleaseTimerRef.current)
+      searchBrightnessReleaseTimerRef.current = null
+    }
+    if (searchBrightnessReleaseRef.current !== null) {
+      window.cancelAnimationFrame(searchBrightnessReleaseRef.current)
+      searchBrightnessReleaseRef.current = null
+    }
+  }
+
+  const resetSearchBrightness = () => {
+    stopSearchBrightnessRelease()
+    setSearchBrightnessPulse(0)
+    setSearchFocusLayer(null)
+  }
+
+  const releaseSearchBrightness = (delay = 0, startPulse = searchBrightnessPulse) => {
+    stopSearchBrightnessRelease()
+
+    const startRelease = () => {
+      searchBrightnessReleaseTimerRef.current = null
+      const startTime = performance.now()
+
+      const animate = (time: number) => {
+        const progress = Math.min(1, (time - startTime) / DOT_MATRIX_FADE_MS)
+        const eased = CSS_EASE(progress)
+
+        setSearchBrightnessPulse(startPulse * (1 - eased))
+
+        if (progress < 1) {
+          searchBrightnessReleaseRef.current = window.requestAnimationFrame(animate)
+          return
+        }
+
+        searchBrightnessReleaseRef.current = null
+        setSearchBrightnessPulse(0)
+        setSearchFocusLayer(null)
+      }
+
+      searchBrightnessReleaseRef.current = window.requestAnimationFrame(animate)
+    }
+
+    if (delay > 0) {
+      searchBrightnessReleaseTimerRef.current = window.setTimeout(startRelease, delay)
+      return
+    }
+
+    startRelease()
+  }
+
   const moveToOrigin = () => {
     if (originAnimationRef.current !== null) {
       window.cancelAnimationFrame(originAnimationRef.current)
@@ -700,6 +1046,7 @@ export function App() {
       searchJumpAnimationRef.current = null
     }
     setVisualLayer(null)
+    resetSearchBrightness()
     setIsSearchJumping(false)
 
     const start = viewport
@@ -745,6 +1092,7 @@ export function App() {
       searchJumpAnimationRef.current = null
     }
     setIsSearchJumping(false)
+    resetSearchBrightness()
 
     const width = workspaceSize.width || window.innerWidth
     const height = workspaceSize.height || window.innerHeight
@@ -764,6 +1112,7 @@ export function App() {
 
     if (duration === 0) {
       setVisualLayer(cell.layer)
+      resetSearchBrightness()
       setLayerAndSelect(cell.layer, cell.id)
       setViewport(targetViewport)
       window.requestAnimationFrame(() => setVisualLayer(null))
@@ -776,6 +1125,9 @@ export function App() {
     }
 
     setVisualLayer(startLayer)
+    stopSearchBrightnessRelease()
+    setSearchBrightnessPulse(0)
+    setSearchFocusLayer(layerDistance > 0 ? cell.layer : null)
     setIsSearchJumping(true)
     setIsCanvasMoving(true)
 
@@ -783,6 +1135,7 @@ export function App() {
       const progress = Math.min(1, (time - startTime) / duration)
       const eased = 1 - Math.pow(1 - progress, 3)
       const nextLayer = startLayer + (cell.layer - startLayer) * eased
+      const brightnessPulse = layerDistance > 0 ? eased : 0
 
       setViewport({
         x: startViewport.x + (targetViewport.x - startViewport.x) * eased,
@@ -790,6 +1143,7 @@ export function App() {
         zoom,
       })
       setVisualLayer(nextLayer)
+      setSearchBrightnessPulse(brightnessPulse)
 
       if (progress < 1) {
         searchJumpAnimationRef.current = window.requestAnimationFrame(animate)
@@ -798,13 +1152,18 @@ export function App() {
 
       searchJumpAnimationRef.current = null
       setVisualLayer(cell.layer)
+      setSearchBrightnessPulse(layerDistance > 0 ? 1 : 0)
+      setSearchFocusLayer(layerDistance > 0 ? cell.layer : null)
       setLayerAndSelect(cell.layer, cell.id)
       setViewport(targetViewport)
       window.requestAnimationFrame(() => {
         setVisualLayer(null)
-        window.requestAnimationFrame(() => setIsSearchJumping(false))
+        window.requestAnimationFrame(() => {
+          setIsSearchJumping(false)
+        })
       })
-      settleCanvasMovement(520)
+      releaseSearchBrightness(SEARCH_SETTLE_MS, layerDistance > 0 ? 1 : 0)
+      settleCanvasMovement(SEARCH_SETTLE_MS)
 
       window.setTimeout(() => {
         document.querySelector<HTMLElement>(`[data-box-id="${cell.id}"] .ProseMirror`)?.focus()
@@ -1086,10 +1445,12 @@ export function App() {
       maxGrowStepIndex,
     )
     const movedSteps = nextIndex - currentIndex
+    let labelScale = 1
 
     if (movedSteps !== 0) {
       const fontSize = FONT_SIZE_STEPS[nextIndex]
       const scale = fontSize / referenceSize
+      labelScale = scale
 
       if (textSegments.length > 0) {
         applyScaledFontSegments(editor, textSegments, scale)
@@ -1102,7 +1463,7 @@ export function App() {
 
     const controlPoint = getScaleControlPoint(box)
     textSizeWheelRotationRef.current += movedSteps * 28
-    setTextSizeDial({
+    showTextSizeDial({
       boxId: box.id,
       x: controlPoint.x,
       y: controlPoint.y,
@@ -1110,14 +1471,11 @@ export function App() {
       rotation: textSizeWheelRotationRef.current,
     })
 
-    if (textSizeWheelTimerRef.current !== null) {
-      window.clearTimeout(textSizeWheelTimerRef.current)
+    if (textSegments.length > 0) {
+      showFontSizeRowLabels(box.id, editor, textSegments, labelScale)
     }
 
-    textSizeWheelTimerRef.current = window.setTimeout(() => {
-      setTextSizeDial(null)
-      textSizeWheelTimerRef.current = null
-    }, 520)
+    scheduleTextSizeUiHide()
 
     return true
   }
@@ -1129,8 +1487,9 @@ export function App() {
     settleCanvasMovement(900)
 
     if (event.ctrlKey || event.metaKey) {
+      textSizeWheelDeltaRef.current = 0
       const direction = event.deltaY > 0 ? -1 : 1
-      const nextLayer = activeLayer + direction
+      const nextLayer = clampNavigableLayer(activeLayer + direction)
       const drag = dragRef.current
 
       if (drag?.type === 'box') {
@@ -1145,10 +1504,23 @@ export function App() {
     }
 
     if (event.shiftKey) {
-      applyTextSizeWheel(event.deltaY > 0 ? -1 : 1)
+      const threshold = 42
+      const wheelDelta = Math.abs(event.deltaY) >= Math.abs(event.deltaX) ? event.deltaY : event.deltaX
+      textSizeWheelDeltaRef.current += wheelDelta
+
+      if (Math.abs(textSizeWheelDeltaRef.current) < threshold) {
+        return
+      }
+
+      const direction = textSizeWheelDeltaRef.current < 0 ? 1 : -1
+      const didResize = applyTextSizeWheel(direction)
+      textSizeWheelDeltaRef.current = didResize
+        ? textSizeWheelDeltaRef.current % threshold
+        : 0
       return
     }
 
+    textSizeWheelDeltaRef.current = 0
     zoomAt(getWorkspacePoint(event.clientX, event.clientY), event.deltaY)
   }
 
@@ -1181,6 +1553,11 @@ export function App() {
   }, [])
 
   const startBoxDrag = (event: ReactPointerEvent<HTMLButtonElement>, box: CellModel) => {
+    if (event.button === 1) {
+      startCanvasPanFromPointer(event)
+      return
+    }
+
     event.preventDefault()
     event.stopPropagation()
     selectBoxWithEmptyCleanup(box.id)
@@ -1199,6 +1576,11 @@ export function App() {
   }
 
   const startResize = (event: ReactPointerEvent<HTMLButtonElement>, box: CellModel) => {
+    if (event.button === 1) {
+      startCanvasPanFromPointer(event)
+      return
+    }
+
     event.preventDefault()
     event.stopPropagation()
     selectBoxWithEmptyCleanup(box.id)
@@ -1257,6 +1639,7 @@ export function App() {
       onConfirm: () => {
         deletedCellUndoStackRef.current = []
         setTextSizeDial(null)
+        setFontSizeRowLabels([])
         setStorageDragPreview(null)
         setVisualLayer(null)
         hydrateDocument({
@@ -1278,6 +1661,11 @@ export function App() {
   }
 
   const startScale = (event: ReactPointerEvent<HTMLButtonElement>, box: CellModel, editor: Editor | null) => {
+    if (event.button === 1) {
+      startCanvasPanFromPointer(event)
+      return
+    }
+
     event.preventDefault()
     event.stopPropagation()
     selectBoxWithEmptyCleanup(box.id)
@@ -1310,23 +1698,37 @@ export function App() {
       editor,
       scaleBoxDefault: selectedSegments.length === 0,
     }
-    setTextSizeDial({
+    showTextSizeDial({
       boxId: box.id,
       x: controlX,
       y: controlY,
       height: controlHeight + SIZE_PICKER_HEIGHT_PADDING,
       rotation: 0,
     })
+    if (editor && textSegments.length > 0) {
+      showFontSizeRowLabels(box.id, editor, textSegments, 1)
+    }
   }
 
   const dotSpacing = DOT_SPACING * viewport.zoom
+  const activeDragType = dragRef.current?.type
+  const shouldSnapCanvas = !isCanvasMoving &&
+    !isPanning &&
+    !isSearchJumping &&
+    activeDragType !== 'canvas'
+  const surfaceX = shouldSnapCanvas ? snapToDevicePixel(viewport.x) : viewport.x
+  const surfaceY = shouldSnapCanvas ? snapToDevicePixel(viewport.y) : viewport.y
+  const workspaceCenterX = (workspaceSize.width || window.innerWidth) / 2
+  const workspaceCenterY = (workspaceSize.height || window.innerHeight) / 2
+  const viewportCenterWorldX = (workspaceCenterX - surfaceX) / viewport.zoom
+  const viewportCenterWorldY = (workspaceCenterY - surfaceY) / viewport.zoom
   const compassAngle = Math.atan2(
     viewport.x - workspaceSize.width / 2,
     -(viewport.y - workspaceSize.height / 2),
   ) * (180 / Math.PI)
 
   return (
-    <main className={`app ${isPanning ? 'is-panning' : ''} ${isCanvasMoving ? 'is-canvas-moving' : ''} ${isSearchJumping ? 'is-search-jumping' : ''}`}>
+    <main className={`app ${isPanning ? 'is-panning' : ''} ${isCanvasMoving ? 'is-canvas-moving' : ''} ${isSearchJumping ? 'is-search-jumping' : ''} ${selectedBoxId ? 'has-selected-cell' : ''}`}>
       <header className="toolbar" aria-label="Document controls">
         <div className="brand">
           <ScrollText size={18} aria-hidden="true" />
@@ -1395,44 +1797,16 @@ export function App() {
           </span>
         </button>
 
-        <nav className="layer-rail" aria-label="Layers">
-          {visibleLayerDots.map((layer) => {
-            const isDraggingLayer = layerDrag?.isDragging && layerDrag.layer === layer
-            const sourceIndex = layerDrag?.sourceOrder.indexOf(layer) ?? -1
-            const visualIndex = layerDrag?.visualOrder.indexOf(layer) ?? -1
-            const rowStep = layerDrag ? Math.max(1, layerDrag.rowHeight + 6) : 0
-            const layerOffset = layerDrag?.isDragging
-              ? isDraggingLayer
-                ? layerDrag.currentY - layerDrag.startY
-                : sourceIndex >= 0 && visualIndex >= 0 ? (visualIndex - sourceIndex) * rowStep : 0
-              : 0
-            const layerStyle = layerDrag?.isDragging && (isDraggingLayer || layerOffset !== 0)
-              ? { transform: `translate(${isDraggingLayer ? 18 : 0}px, ${layerOffset}px)` } as CSSProperties
-              : undefined
-
-            return (
-            <button
-              key={layer}
-              className={[
-                'layer-dot',
-                layer === visibleActiveLayer ? 'is-active' : '',
-                isDraggingLayer ? 'is-dragging' : '',
-              ].filter(Boolean).join(' ')}
-              type="button"
-              title={getLayerTitle(layer)}
-              aria-label={`Go to ${getLayerTitle(layer)}`}
-              style={layerStyle}
-              onPointerDown={(event) => startLayerDrag(event, layer)}
-              onPointerMove={moveLayerDrag}
-              onPointerUp={finishLayerDrag}
-              onPointerCancel={finishLayerDrag}
-            >
-              <Circle size={13} strokeWidth={layer === visibleActiveLayer ? 4 : 2} />
-              <span>{getLayerTitle(layer)}</span>
-            </button>
-            )
-          })}
-        </nav>
+        <LayerRail
+          layers={visibleLayerDots}
+          activeLayer={visibleActiveLayer}
+          dragState={layerDrag}
+          releaseState={layerRelease}
+          getLayerTitle={getLayerTitle}
+          onPointerDown={startLayerDrag}
+          onPointerMove={moveLayerDrag}
+          onPointerUp={finishLayerDrag}
+        />
 
         <section
           ref={workspaceRef}
@@ -1454,7 +1828,7 @@ export function App() {
           <div
             className="surface-grid"
             style={{
-              transform: `translate(${viewport.x}px, ${viewport.y}px) scale(${viewport.zoom})`,
+              transform: `translate(${surfaceX}px, ${surfaceY}px) scale(${viewport.zoom})`,
             }}
           >
             <div className="page-guide" aria-hidden="true" />
@@ -1464,14 +1838,24 @@ export function App() {
                 box={box}
                 isSelected={selectedBoxId === box.id}
                 activeLayer={activeLayer}
-                visualLayer={layerRenderPosition}
+                frontLayer={frontLayer}
+                displayLayer={layerPreviewMap?.get(box.layer) ?? box.layer}
+                visualLayer={visualLayerRenderPosition}
+                theme={theme}
                 viewportZoom={viewport.zoom}
-                cellOpacity={settings.cellOpacity}
+                viewportCenterWorldX={viewportCenterWorldX}
+                viewportCenterWorldY={viewportCenterWorldY}
+                layerPanDepth={settings.layerPanDepth}
+                backgroundLayerBrightness={settings.backgroundLayerBrightness}
+                backgroundLayerBlur={settings.backgroundLayerBlur}
+                searchFocusLayer={searchFocusLayer}
+                searchBrightnessPulse={searchBrightnessPulse}
                 onSelect={selectBoxWithEmptyCleanup}
                 onStartDrag={startBoxDrag}
                 onDelete={deleteCellWithConfirmation}
                 onStartResize={startResize}
                 onStartScale={startScale}
+                onStartPan={startCanvasPanFromPointer}
                 isScalingText={textSizeDial?.boxId === box.id}
                 onEditorReady={registerEditor}
                 onEditorDestroy={unregisterEditor}
@@ -1495,6 +1879,7 @@ export function App() {
         onClose={() => setIsSettingsOpen(false)}
         onThemeChange={setTheme}
         onSettingsChange={updateSettings}
+        onResetSettings={resetSettings}
         onExportDocument={exportDocument}
         onImportDocument={importDocument}
       />
@@ -1522,240 +1907,37 @@ export function App() {
           y={textSizeDial.y}
           height={textSizeDial.height}
           rotation={textSizeDial.rotation}
+          isExiting={textSizeDial.isExiting}
         />
+      )}
+
+      {textSizeDial && fontSizeRowLabels.length > 0 && (
+        <div
+          className={`font-size-row-labels ${textSizeDial.isExiting ? 'is-exiting' : ''}`}
+          aria-hidden="true"
+        >
+          {fontSizeRowLabels.map((label) => (
+            <span
+              key={label.id}
+              className="font-size-row-label"
+              style={{
+                left: label.x,
+                top: label.y,
+              }}
+            >
+              {label.size}
+            </span>
+          ))}
+        </div>
       )}
 
       <ConfirmationDialog
         request={confirmationRequest}
         onCancel={() => setConfirmationRequest(null)}
         onConfirm={confirmRequestedAction}
+        fadeMs={CONFIRMATION_UI_FADE_MS}
       />
     </main>
   )
 }
 
-type ConfirmationDialogProps = {
-  request: ConfirmationRequest | null
-  onCancel: () => void
-  onConfirm: () => void
-}
-
-function ConfirmationDialog({ request, onCancel, onConfirm }: ConfirmationDialogProps) {
-  if (!request) {
-    return null
-  }
-
-  return (
-    <div className="confirmation-backdrop" role="presentation" onPointerDown={onCancel}>
-      <section
-        className="confirmation-dialog"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="confirmation-title"
-        aria-describedby={request.message ? 'confirmation-message' : undefined}
-        onPointerDown={(event) => event.stopPropagation()}
-      >
-        <div>
-          <h2 id="confirmation-title">{request.title}</h2>
-          {request.message && <p id="confirmation-message">{request.message}</p>}
-        </div>
-        <div className="confirmation-actions">
-          <button className="confirmation-button" type="button" onClick={onCancel}>
-            Cancel
-          </button>
-          <button className="confirmation-button is-danger" type="button" onClick={onConfirm}>
-            {request.confirmLabel}
-          </button>
-        </div>
-      </section>
-    </div>
-  )
-}
-
-type CanvasTextBoxProps = {
-  box: CellModel
-  isSelected: boolean
-  activeLayer: number
-  visualLayer: number
-  viewportZoom: number
-  cellOpacity: number
-  onSelect: (id: string | null) => void
-  onStartDrag: (event: ReactPointerEvent<HTMLButtonElement>, box: CellModel) => void
-  onDelete: (box: CellModel) => void
-  onStartResize: (event: ReactPointerEvent<HTMLButtonElement>, box: CellModel) => void
-  onStartScale: (event: ReactPointerEvent<HTMLButtonElement>, box: CellModel, editor: Editor | null) => void
-  isScalingText: boolean
-  onEditorReady: (boxId: string, editor: Editor) => void
-  onEditorDestroy: (boxId: string) => void
-}
-
-function CanvasTextBox({
-  box,
-  isSelected,
-  activeLayer,
-  visualLayer,
-  viewportZoom,
-  cellOpacity,
-  onSelect,
-  onStartDrag,
-  onDelete,
-  onStartResize,
-  onStartScale,
-  isScalingText,
-  onEditorReady,
-  onEditorDestroy,
-}: CanvasTextBoxProps) {
-  const updateBox = useDocumentStore((state) => state.updateBox)
-  const layerDistance = Math.abs(box.layer - visualLayer)
-  const isLayerActive = box.layer === activeLayer
-  const editor = useEditor({
-    extensions: createEditorExtensions({ imageResize: true }),
-    content: box.content,
-    editable: isLayerActive,
-    editorProps: {
-      attributes: {
-        class: 'text-editor',
-      },
-      handleDOMEvents: {
-        keydown: (view, event) => {
-          return handleListDeletionKey(view, event, box.fontSize ?? 12)
-        },
-      },
-      handleKeyDown: (view, event) => {
-        if (handleListDeletionKey(view, event, box.fontSize ?? 12)) {
-          return true
-        }
-
-        if (event.key === 'Enter') {
-          preserveFontSizeAfterEnter(view, box.fontSize ?? 12)
-          return false
-        }
-
-        if (event.key === ' ') {
-          preserveFontSizeAfterEnter(view, box.fontSize ?? 12)
-          return false
-        }
-
-        if (event.key !== 'Tab') {
-          return false
-        }
-
-        event.preventDefault()
-        view.dispatch(view.state.tr.insertText('\t'))
-        return true
-      },
-    },
-    onUpdate: ({ editor: activeEditor }) => {
-      updateBox(box.id, {
-        content: activeEditor.getJSON(),
-      })
-    },
-    immediatelyRender: false,
-  })
-
-  useEffect(() => {
-    editor?.setEditable(isLayerActive)
-  }, [editor, isLayerActive])
-
-  useEffect(() => {
-    if (!editor) {
-      return
-    }
-
-    const handleMouseDown = (event: MouseEvent) => {
-      startImageResizeCorrection(event, editor, viewportZoom)
-    }
-
-    editor.view.dom.addEventListener('mousedown', handleMouseDown, { capture: true })
-
-    return () => {
-      editor.view.dom.removeEventListener('mousedown', handleMouseDown, { capture: true })
-    }
-  }, [editor, viewportZoom])
-
-  useEffect(() => {
-    if (!editor) {
-      return
-    }
-
-    onEditorReady(box.id, editor)
-
-    return () => {
-      onEditorDestroy(box.id)
-    }
-  }, [box.id, editor, onEditorDestroy, onEditorReady])
-
-  const depthOpacity = layerDistance === 0 ? 1 : Math.max(0, 0.48 - layerDistance * 0.16)
-  const depthBlur = layerDistance === 0 ? 0 : Math.min(10, layerDistance * 4)
-  const depthBrightness = layerDistance === 0 ? 1 : Math.max(0.62, 0.88 - layerDistance * 0.08)
-  const depthShift = (visualLayer - box.layer) * 20
-  const controlScale = (1 + viewportZoom) / (2 * viewportZoom)
-
-  return (
-    <article
-      className={`text-box ${isSelected ? 'is-selected' : ''} ${isLayerActive ? 'is-active-layer' : ''}`}
-      data-box-id={box.id}
-      style={{
-        left: box.x,
-        top: box.y,
-        width: box.width,
-        minHeight: box.height,
-        opacity: depthOpacity,
-        filter: `blur(${depthBlur}px) brightness(${depthBrightness})`,
-        transform: `translateY(${depthShift}px) scale(${1 - Math.min(layerDistance * 0.018, 0.08)})`,
-        background: cellOpacity > 0 ? `rgb(var(--canvas-bg-rgb) / ${cellOpacity / 100})` : 'transparent',
-        pointerEvents: isLayerActive ? 'auto' : 'none',
-        zIndex: 1000 - layerDistance,
-        fontSize: box.fontSize ?? 12,
-        borderWidth: 1 / viewportZoom,
-        '--control-scale': controlScale,
-      } as CSSProperties}
-      onPointerDown={(event) => {
-        event.stopPropagation()
-        onSelect(box.id)
-      }}
-    >
-      <button
-        className="dragbar"
-        type="button"
-        title="Drag text box"
-        aria-label="Drag text box"
-        onPointerDown={(event) => onStartDrag(event, box)}
-      >
-        <Grip size={14} aria-hidden="true" />
-      </button>
-      <button
-        className="cell-delete-handle"
-        type="button"
-        title="Delete cell"
-        aria-label="Delete cell"
-        onPointerDown={(event) => {
-          event.preventDefault()
-          event.stopPropagation()
-          onDelete(box)
-        }}
-      >
-        <Trash2 size={13} aria-hidden="true" />
-      </button>
-      <button
-        className={`scale-handle ${isScalingText ? 'is-scaling' : ''}`}
-        type="button"
-        title="Scale text"
-        aria-label="Scale text"
-        onPointerDown={(event) => onStartScale(event, box, editor)}
-      >
-        <Type size={14} strokeWidth={2.4} aria-hidden="true" />
-      </button>
-      <EditorContent editor={editor} />
-      <button
-        className="resize-handle"
-        type="button"
-        title="Resize text box"
-        aria-label="Resize text box"
-        onPointerDown={(event) => onStartResize(event, box)}
-      >
-        <Maximize2 size={13} aria-hidden="true" />
-      </button>
-    </article>
-  )
-}

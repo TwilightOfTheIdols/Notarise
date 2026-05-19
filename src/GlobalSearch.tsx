@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Search, X } from 'lucide-react'
-import { extractTextPreview, getContentText } from './contentUtils'
+import { getContentSummary } from './contentUtils'
 import type { CellModel } from './store'
 
 type SearchResult = {
@@ -8,6 +8,11 @@ type SearchResult = {
   layerTitle: string
   preview: string
   matchedLayer: boolean
+}
+
+type SearchIndexEntry = SearchResult & {
+  searchableText: string
+  searchableLayer: string
 }
 
 type GlobalSearchProps = {
@@ -22,27 +27,34 @@ export function GlobalSearch({ cells, getLayerTitle, onActivate, onResultSelect 
   const [query, setQuery] = useState('')
   const normalizedQuery = query.trim().toLocaleLowerCase()
 
+  const searchIndex = useMemo<SearchIndexEntry[]>(() => {
+    return cells
+      .map((cell) => {
+        const layerTitle = getLayerTitle(cell.layer)
+        const summary = getContentSummary(cell.content)
+
+        return {
+          cell,
+          layerTitle,
+          preview: summary.preview,
+          matchedLayer: false,
+          searchableText: summary.text.toLocaleLowerCase(),
+          searchableLayer: layerTitle.toLocaleLowerCase(),
+        }
+      })
+  }, [cells, getLayerTitle])
+
   const results = useMemo<SearchResult[]>(() => {
     if (!normalizedQuery) {
       return []
     }
 
-    return cells
-      .map((cell) => {
-        const layerTitle = getLayerTitle(cell.layer)
-        const searchableText = getContentText(cell.content).toLocaleLowerCase()
-        const searchableLayer = layerTitle.toLocaleLowerCase()
-        const matchedText = searchableText.includes(normalizedQuery)
-        const matchedLayer = searchableLayer.includes(normalizedQuery)
-
-        return {
-          cell,
-          layerTitle,
-          preview: extractTextPreview(cell.content),
-          matchedLayer,
-          matchedText,
-        }
-      })
+    return searchIndex
+      .map((result) => ({
+        ...result,
+        matchedLayer: result.searchableLayer.includes(normalizedQuery),
+        matchedText: result.searchableText.includes(normalizedQuery),
+      }))
       .filter((result) => result.matchedText || result.matchedLayer)
       .sort((a, b) => {
         if (a.matchedLayer !== b.matchedLayer) {
@@ -55,7 +67,7 @@ export function GlobalSearch({ cells, getLayerTitle, onActivate, onResultSelect 
 
         return 0
       })
-  }, [cells, getLayerTitle, normalizedQuery])
+  }, [normalizedQuery, searchIndex])
 
   const isOpen = query.length > 0
 
