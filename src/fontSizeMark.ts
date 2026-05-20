@@ -40,7 +40,7 @@ export const RowFontSize = Extension.create({
   addGlobalAttributes() {
     return [
       {
-        types: ['paragraph', 'heading', 'listItem', 'orderedList', 'bulletList'],
+        types: ['paragraph', 'heading', 'listItem', 'orderedList', 'bulletList', 'taskItem', 'taskList'],
         attributes: {
           fontSize: {
             default: null,

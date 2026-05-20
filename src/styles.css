@@ -161,7 +161,9 @@ button {
 .cell-delete-handle,
 .resize-handle,
 .scale-handle,
+.todo-handle,
 .trash-bucket,
+.todo-bucket,
 .origin-compass,
 .permanent-delete-button {
   display: inline-grid;
@@ -204,7 +206,22 @@ button {
   right: 18px;
 }
 
+.todo-bucket {
+  position: absolute;
+  top: 86px;
+  right: 18px;
+  z-index: 14;
+  width: 58px;
+  height: 58px;
+  border-radius: 14px;
+  background: var(--control-bg);
+}
+
 .trash-bucket.is-open {
+  border-color: var(--active-line);
+}
+
+.todo-bucket.is-open {
   border-color: var(--active-line);
 }
 
@@ -236,6 +253,7 @@ button {
 .icon-button:hover,
 .layer-dot:hover,
 .trash-bucket:hover,
+.todo-bucket:hover,
 .origin-compass:hover,
 .permanent-delete-button:hover {
   background: var(--control-hover);
@@ -245,7 +263,8 @@ button {
 .dragbar:hover,
 .cell-delete-handle:hover,
 .resize-handle:hover,
-.scale-handle:hover {
+.scale-handle:hover,
+.todo-handle:hover {
   color: var(--text);
   background: var(--canvas-bg);
   border-color: var(--active-line);
@@ -366,10 +385,15 @@ button {
 .surface-grid {
   position: absolute;
   inset: 0 auto auto 0;
+  z-index: 1;
   width: 1px;
   height: 1px;
   transform-origin: 0 0;
   will-change: transform;
+}
+
+.is-cell-dragging .surface-grid {
+  z-index: 40;
 }
 
 .dot-matrix {
@@ -418,6 +442,13 @@ button {
   transition: border-color 160ms ease;
 }
 
+.text-box.is-dragging {
+  transition:
+    opacity 180ms ease,
+    filter 180ms ease,
+    border-color 160ms ease;
+}
+
 .text-box.is-selected,
 .text-box:focus-within {
   border-color: var(--text);
@@ -426,7 +457,8 @@ button {
 .dragbar,
 .cell-delete-handle,
 .resize-handle,
-.scale-handle {
+.scale-handle,
+.todo-handle {
   position: absolute;
   z-index: 3;
   padding: 0;
@@ -442,7 +474,8 @@ button {
 .text-box .dragbar,
 .text-box .cell-delete-handle,
 .text-box .resize-handle,
-.text-box .scale-handle {
+.text-box .scale-handle,
+.text-box .todo-handle {
   opacity: 0;
 }
 
@@ -450,14 +483,17 @@ button {
 .text-box.is-selected .cell-delete-handle,
 .text-box.is-selected .resize-handle,
 .text-box.is-selected .scale-handle,
+.text-box.is-selected .todo-handle,
 .text-box:focus-within .dragbar,
 .text-box:focus-within .cell-delete-handle,
 .text-box:focus-within .resize-handle,
 .text-box:focus-within .scale-handle,
+.text-box:focus-within .todo-handle,
 .text-box:hover .dragbar,
 .text-box:hover .cell-delete-handle,
 .text-box:hover .resize-handle,
-.text-box:hover .scale-handle {
+.text-box:hover .scale-handle,
+.text-box:hover .todo-handle {
   opacity: 1;
   pointer-events: auto;
 }
@@ -501,13 +537,15 @@ button {
 .dragbar svg,
 .cell-delete-handle svg,
 .scale-handle svg,
-.resize-handle svg {
+.resize-handle svg,
+.todo-handle svg {
   display: block;
   grid-area: 1 / 1;
 }
 
 .dragbar svg,
-.scale-handle svg {
+.scale-handle svg,
+.todo-handle svg {
   width: calc(16px * var(--control-scale, 1));
   height: calc(16px * var(--control-scale, 1));
 }
@@ -524,7 +562,7 @@ button {
 }
 
 .scale-handle {
-  right: calc(8px * var(--control-scale, 1));
+  right: calc(42px * var(--control-scale, 1));
   top: calc(8px * var(--control-scale, 1));
   width: calc(28px * var(--control-scale, 1));
   height: calc(24px * var(--control-scale, 1));
@@ -534,6 +572,14 @@ button {
 
 .scale-handle.is-scaling {
   opacity: 0;
+}
+
+.todo-handle {
+  right: calc(8px * var(--control-scale, 1));
+  top: calc(8px * var(--control-scale, 1));
+  width: calc(28px * var(--control-scale, 1));
+  height: calc(24px * var(--control-scale, 1));
+  border-radius: calc(7px * var(--control-scale, 1));
 }
 
 .text-editor {
@@ -551,6 +597,78 @@ button {
 
 .text-editor p {
   margin: 0;
+}
+
+.text-editor ul[data-type='taskList'] {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.text-editor li[data-type='taskItem'],
+.text-editor li[data-checked] {
+  display: flex !important;
+  gap: 8px;
+  align-items: center;
+  margin: 0;
+  padding: 0;
+  color: var(--text);
+}
+
+.text-editor li[data-type='taskItem'] > label,
+.text-editor li[data-checked] > label {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 1.18em;
+  height: 1.2em;
+  margin: 0;
+  padding: 0;
+  font-size: inherit;
+}
+
+.text-editor li[data-type='taskItem'] input[type='checkbox'],
+.text-editor li[data-checked] input[type='checkbox'] {
+  -webkit-appearance: none;
+  appearance: none;
+  flex: 0 0 auto;
+  width: 0.92em;
+  height: 0.92em;
+  margin: 0;
+  font-size: inherit;
+  border: 0.08em solid var(--text);
+  border-radius: 0.2em;
+  background: var(--canvas-bg);
+  cursor: pointer;
+}
+
+.text-editor li[data-type='taskItem'] input[type='checkbox']:checked,
+.text-editor li[data-checked] input[type='checkbox']:checked {
+  background: var(--text);
+  box-shadow: inset 0 0 0 0.22em var(--canvas-bg);
+}
+
+.text-editor li[data-type='taskItem'] > label > span,
+.text-editor li[data-checked] > label > span {
+  display: none;
+}
+
+.text-editor li[data-type='taskItem'] > div,
+.text-editor li[data-checked] > div {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.text-editor li[data-type='taskItem'] > div > p,
+.text-editor li[data-checked] > div > p {
+  margin: 0;
+}
+
+.text-editor li[data-type='taskItem'][data-checked='true'] > div,
+.text-editor li[data-checked='true'] > div {
+  color: var(--muted);
+  text-decoration: line-through;
 }
 
 .text-editor img {
@@ -651,9 +769,19 @@ button {
   line-height: 1.2;
 }
 
+.text-editor li[data-type='taskItem'],
+.text-editor li[data-checked] {
+  display: flex !important;
+}
+
 .text-editor li p {
   display: inline;
   margin: 0;
+}
+
+.text-editor li[data-type='taskItem'] > div > p,
+.text-editor li[data-checked] > div > p {
+  display: block;
 }
 
 .layer-rail {
@@ -746,7 +874,8 @@ button {
   white-space: nowrap;
 }
 
-.deleted-panel {
+.deleted-panel,
+.todo-panel {
   position: fixed;
   z-index: 30;
   top: 56px;
@@ -789,18 +918,26 @@ button {
 }
 
 .deleted-panel.is-open,
+.todo-panel.is-open,
 .settings-panel.is-open {
   opacity: 1;
   pointer-events: auto;
   transform: translateX(0);
 }
 
+.deleted-panel.is-drop-target {
+  border-left-color: var(--active-line);
+  background: color-mix(in srgb, var(--canvas-bg) 92%, var(--trim));
+}
+
 :root[data-theme='dark'] .deleted-panel,
+:root[data-theme='dark'] .todo-panel,
 :root[data-theme='dark'] .settings-panel {
   box-shadow: -18px 0 40px rgba(255, 255, 255, 0.06);
 }
 
 .deleted-panel-header,
+.todo-panel-header,
 .settings-panel-header {
   display: flex;
   align-items: center;
@@ -812,6 +949,8 @@ button {
 
 .deleted-panel-header h2,
 .deleted-panel-header p,
+.todo-panel-header h2,
+.todo-panel-header p,
 .settings-panel-header h2,
 .settings-group h3,
 .deleted-item p {
@@ -819,19 +958,89 @@ button {
 }
 
 .deleted-panel-header h2,
+.todo-panel-header h2,
 .settings-panel-header h2 {
   font-size: 16px;
   line-height: 1.2;
 }
 
+.todo-panel-title {
+  display: grid;
+  gap: 6px;
+}
+
+.todo-show-checked-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  width: fit-content;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  user-select: none;
+}
+
+.todo-show-checked-toggle input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.todo-show-checked-toggle span {
+  position: relative;
+  width: 26px;
+  height: 16px;
+  border: 1px solid var(--hairline);
+  border-radius: 999px;
+  background: var(--control-bg);
+  transition:
+    background-color 160ms ease,
+    border-color 160ms ease;
+}
+
+.todo-show-checked-toggle span::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  background: var(--muted);
+  transition:
+    background-color 160ms ease,
+    transform 160ms ease;
+}
+
+.todo-show-checked-toggle input:checked + span {
+  border-color: var(--active-line);
+  background: var(--control-hover);
+}
+
+.todo-show-checked-toggle input:checked + span::after {
+  background: var(--text);
+  transform: translateX(10px);
+}
+
+.todo-show-checked-toggle:hover {
+  color: var(--text);
+}
+
 .deleted-panel-header p,
+.todo-panel-header p,
 .deleted-item span,
-.deleted-empty {
+.deleted-empty,
+.todo-empty {
   color: var(--muted);
   font-size: 12px;
 }
 
-.deleted-list {
+.deleted-list,
+.todo-list {
   min-height: 0;
   overflow-y: auto;
   padding: 10px;
@@ -1045,7 +1254,8 @@ button {
   line-height: 1.35;
 }
 
-.deleted-empty {
+.deleted-empty,
+.todo-empty {
   margin: 8px;
 }
 
@@ -1062,6 +1272,92 @@ button {
 
 .deleted-item:active {
   cursor: grabbing;
+}
+
+.todo-layer-group {
+  display: grid;
+  gap: 8px;
+  padding: 12px 8px 14px;
+  border-bottom: 1px solid var(--hairline);
+}
+
+.todo-layer-group h3 {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.todo-cell-group {
+  display: grid;
+  gap: 4px;
+}
+
+.todo-cell-title,
+.todo-cell-group li button {
+  width: 100%;
+  border: 0;
+  color: var(--text);
+  background: transparent;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.todo-cell-title {
+  padding: 6px 8px;
+  border-radius: 7px;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.todo-cell-title:hover,
+.todo-cell-group li button:hover {
+  background: var(--control-bg);
+}
+
+.todo-cell-group ul {
+  display: grid;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.todo-cell-group li button {
+  display: grid;
+  grid-template-columns: 13px minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
+  padding: 5px 8px;
+  border-radius: 7px;
+}
+
+.todo-cell-group li span {
+  width: 12px;
+  height: 12px;
+  margin-top: 2px;
+  border: 1px solid var(--text);
+  border-radius: 3px;
+  background: var(--canvas-bg);
+}
+
+.todo-cell-group li.is-checked span {
+  background: var(--text);
+  box-shadow: inset 0 0 0 3px var(--canvas-bg);
+}
+
+.todo-cell-group li p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.todo-cell-group li.is-checked p {
+  text-decoration: line-through;
+  opacity: 0.58;
 }
 
 .storage-drag-preview {

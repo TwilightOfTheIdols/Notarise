@@ -2,9 +2,14 @@ import { memo, useEffect, useMemo } from 'react'
 import type { CSSProperties, PointerEvent as ReactPointerEvent } from 'react'
 import { EditorContent, useEditor } from '@tiptap/react'
 import type { Editor } from '@tiptap/react'
-import { Grip, Maximize2, Trash2, Type } from 'lucide-react'
+import { Grip, ListTodo, Maximize2, Trash2, Type } from 'lucide-react'
 import { createEditorExtensions } from './editorConfig'
-import { handleListDeletionKey, preserveFontSizeAfterEnter, startImageResizeCorrection } from './editorBehaviors'
+import {
+  handleListDeletionKey,
+  normalizeTaskItemFontSizes,
+  preserveFontSizeAfterEnter,
+  startImageResizeCorrection,
+} from './editorBehaviors'
 import { useDocumentStore } from './store'
 import type { CellModel, Theme } from './store'
 
@@ -30,6 +35,7 @@ export type CanvasTextBoxProps = {
   backgroundLayerBlur: number
   searchFocusLayer: number | null
   searchBrightnessPulse: number
+  isDragging: boolean
   onSelect: (id: string | null) => void
   onStartDrag: (event: ReactPointerEvent<HTMLButtonElement>, box: CellModel) => void
   onDelete: (box: CellModel) => void
@@ -57,6 +63,7 @@ export const CanvasTextBox = memo(function CanvasTextBox({
   backgroundLayerBlur,
   searchFocusLayer,
   searchBrightnessPulse,
+  isDragging,
   onSelect,
   onStartDrag,
   onDelete,
@@ -73,6 +80,7 @@ export const CanvasTextBox = memo(function CanvasTextBox({
   const isLayerActive = box.layer === activeLayer
   const isFrontLayer = displayLayer === frontLayer
   const editorExtensions = useMemo(() => createEditorExtensions({ imageResize: true }), [])
+  const contentKey = useMemo(() => JSON.stringify(box.content), [box.content])
   const editor = useEditor({
     extensions: editorExtensions,
     content: box.content,
@@ -121,6 +129,18 @@ export const CanvasTextBox = memo(function CanvasTextBox({
   useEffect(() => {
     editor?.setEditable(isLayerActive)
   }, [editor, isLayerActive])
+
+  useEffect(() => {
+    if (!editor) {
+      return
+    }
+
+    if (JSON.stringify(editor.getJSON()) !== contentKey) {
+      editor.commands.setContent(box.content, { emitUpdate: false })
+    }
+
+    normalizeTaskItemFontSizes(editor, box.fontSize ?? 12)
+  }, [box.content, box.fontSize, contentKey, editor])
 
   useEffect(() => {
     if (!editor) {
@@ -180,10 +200,28 @@ export const CanvasTextBox = memo(function CanvasTextBox({
   const layerZIndex = isFrontLayer
     ? 3000 + displayLayer
     : 1000 + displayLayer
+  const insertTodo = () => {
+    editor?.chain().focus().insertContent({
+      type: 'taskList',
+      content: [
+        {
+          type: 'taskItem',
+          attrs: {
+            checked: false,
+          },
+          content: [
+            {
+              type: 'paragraph',
+            },
+          ],
+        },
+      ],
+    }).run()
+  }
 
   return (
     <article
-      className={`text-box ${isSelected ? 'is-selected' : ''} ${isLayerActive ? 'is-active-layer' : ''}`}
+      className={`text-box ${isSelected ? 'is-selected' : ''} ${isLayerActive ? 'is-active-layer' : ''} ${isDragging ? 'is-dragging' : ''}`}
       data-box-id={box.id}
       style={{
         left: box.x,
@@ -196,7 +234,7 @@ export const CanvasTextBox = memo(function CanvasTextBox({
         transformOrigin: depthTransformOrigin,
         background: 'transparent',
         pointerEvents: isLayerActive ? 'auto' : 'none',
-        zIndex: layerZIndex,
+        zIndex: isDragging ? 100000 : layerZIndex,
         fontSize: box.fontSize ?? 12,
         borderWidth: 1 / viewportZoom,
         '--control-scale': controlScale,
@@ -247,6 +285,19 @@ export const CanvasTextBox = memo(function CanvasTextBox({
         onPointerDown={(event) => onStartScale(event, box, editor)}
       >
         <Type size={14} strokeWidth={2.4} aria-hidden="true" />
+      </button>
+      <button
+        className="todo-handle"
+        type="button"
+        title="Insert todo"
+        aria-label="Insert todo"
+        onPointerDown={(event) => {
+          event.preventDefault()
+          event.stopPropagation()
+          insertTodo()
+        }}
+      >
+        <ListTodo size={14} strokeWidth={2.2} aria-hidden="true" />
       </button>
       <EditorContent editor={editor} />
       <button

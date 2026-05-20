@@ -10,8 +10,8 @@ export type FontSizeSegment = {
   rowFrom: number
   rowTo: number
   rowAttrs: Record<string, unknown>
-  listItemPos: number | null
-  listItemAttrs: Record<string, unknown> | null
+  containerItemPos: number | null
+  containerItemAttrs: Record<string, unknown> | null
 }
 
 type ImageResizeDirection = 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right'
@@ -133,7 +133,7 @@ function captureFontSegments(
     const rowFrom = pos + 1
     const rowTo = pos + node.nodeSize - 1
     const rowSize = getRowFontSize(node.attrs, fallbackSize)
-    const listItemContext = getListItemContext(editor.state.doc, pos)
+    const containerItemContext = getContainerItemContext(editor.state.doc, pos)
 
     node.descendants((child, offset) => {
       if (!child.isText || child.nodeSize === 0) {
@@ -157,8 +157,8 @@ function captureFontSegments(
         rowFrom,
         rowTo,
         rowAttrs: node.attrs,
-        listItemPos: listItemContext?.pos ?? null,
-        listItemAttrs: listItemContext?.attrs ?? null,
+        containerItemPos: containerItemContext?.pos ?? null,
+        containerItemAttrs: containerItemContext?.attrs ?? null,
       })
     })
 
@@ -179,14 +179,29 @@ function getRowFontSize(attrs: Record<string, unknown>, fallbackSize: number) {
   return Number.isFinite(size) && size > 0 ? size : fallbackSize
 }
 
-function getListItemContext(doc: Editor['state']['doc'], textBlockPos: number) {
+function getFirstTextFontSize(node: Editor['state']['doc'], fallbackSize: number) {
+  let size = fallbackSize
+
+  node.descendants((child) => {
+    if (!child.isText) {
+      return true
+    }
+
+    size = getNodeFontSize(child.marks, fallbackSize)
+    return false
+  })
+
+  return size
+}
+
+function getContainerItemContext(doc: Editor['state']['doc'], textBlockPos: number) {
   const resolvePos = Math.min(textBlockPos + 1, doc.content.size)
   const $pos = doc.resolve(resolvePos)
 
   for (let depth = $pos.depth; depth > 0; depth -= 1) {
     const node = $pos.node(depth)
 
-    if (node.type.name === 'listItem') {
+    if (node.type.name === 'listItem' || node.type.name === 'taskItem') {
       return {
         pos: $pos.before(depth),
         attrs: node.attrs,
@@ -254,7 +269,7 @@ export function preserveFontSizeAfterEnter(view: Editor['view'], fallbackSize: n
     ]
 
     let transaction = view.state.tr.setStoredMarks(marks)
-    const fontSizedNodeTypes = new Set(['paragraph', 'heading', 'listItem', 'orderedList', 'bulletList'])
+    const fontSizedNodeTypes = new Set(['paragraph', 'heading', 'listItem', 'orderedList', 'bulletList', 'taskItem', 'taskList'])
 
     for (let depth = view.state.selection.$from.depth; depth > 0; depth -= 1) {
       const node = view.state.selection.$from.node(depth)
@@ -468,8 +483,8 @@ export function applyScaledFontSegments(editor: Editor, segments: FontSizeSegmen
     attrs: Record<string, unknown>
     from: number
     to: number
-    listItemPos: number | null
-    listItemAttrs: Record<string, unknown> | null
+    containerItemPos: number | null
+    containerItemAttrs: Record<string, unknown> | null
     weightedSize: number
     length: number
   }>()
@@ -481,8 +496,8 @@ export function applyScaledFontSegments(editor: Editor, segments: FontSizeSegmen
     if (rowGroup) {
       rowGroup.weightedSize += segment.size * length
       rowGroup.length += length
-      rowGroup.listItemPos = segment.listItemPos ?? rowGroup.listItemPos
-      rowGroup.listItemAttrs = segment.listItemAttrs ?? rowGroup.listItemAttrs
+      rowGroup.containerItemPos = segment.containerItemPos ?? rowGroup.containerItemPos
+      rowGroup.containerItemAttrs = segment.containerItemAttrs ?? rowGroup.containerItemAttrs
       return
     }
 
@@ -490,8 +505,8 @@ export function applyScaledFontSegments(editor: Editor, segments: FontSizeSegmen
       attrs: segment.rowAttrs,
       from: segment.rowFrom,
       to: segment.rowTo,
-      listItemPos: segment.listItemPos,
-      listItemAttrs: segment.listItemAttrs,
+      containerItemPos: segment.containerItemPos,
+      containerItemAttrs: segment.containerItemAttrs,
       weightedSize: segment.size * length,
       length,
     })
@@ -505,9 +520,9 @@ export function applyScaledFontSegments(editor: Editor, segments: FontSizeSegmen
       fontSize: size,
     })
 
-    if (row.listItemPos !== null && row.listItemAttrs) {
-      transaction.setNodeMarkup(row.listItemPos, undefined, {
-        ...row.listItemAttrs,
+    if (row.containerItemPos !== null && row.containerItemAttrs) {
+      transaction.setNodeMarkup(row.containerItemPos, undefined, {
+        ...row.containerItemAttrs,
         fontSize: size,
       })
     }
@@ -517,6 +532,41 @@ export function applyScaledFontSegments(editor: Editor, segments: FontSizeSegmen
   })
 
   transaction.setMeta('addToHistory', false)
+  editor.view.dispatch(transaction)
+}
+
+export function normalizeTaskItemFontSizes(editor: Editor, fallbackSize: number) {
+  let transaction = editor.state.tr
+  let didChange = false
+
+  editor.state.doc.descendants((node, pos) => {
+    if (node.type.name !== 'taskItem') {
+      return true
+    }
+
+    const paragraph = node.firstChild
+    const paragraphSize = paragraph
+      ? getRowFontSize(paragraph.attrs, getFirstTextFontSize(paragraph, fallbackSize))
+      : fallbackSize
+    const currentSize = getRowFontSize(node.attrs, fallbackSize)
+
+    if (currentSize !== paragraphSize) {
+      transaction = transaction.setNodeMarkup(pos, undefined, {
+        ...node.attrs,
+        fontSize: paragraphSize,
+      })
+      didChange = true
+    }
+
+    return true
+  })
+
+  if (!didChange) {
+    return
+  }
+
+  transaction.setMeta('addToHistory', false)
+  transaction.setMeta('preventUpdate', true)
   editor.view.dispatch(transaction)
 }
 

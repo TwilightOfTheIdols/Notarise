@@ -1,5 +1,6 @@
 import type { PointerEvent as ReactPointerEvent } from 'react'
 import { useEffect } from 'react'
+import type { RefObject } from 'react'
 import { EditorContent, useEditor } from '@tiptap/react'
 import { Trash2, X } from 'lucide-react'
 import { EMPTY_DOCUMENT_CONTENT } from './constants'
@@ -67,6 +68,8 @@ export function StorageDragPreview({ cell, x, y, zoom }: StorageDragPreviewProps
 type DeletedTextPanelProps = {
   deletedBoxes: StoredCellModel[]
   isOpen: boolean
+  isDropTarget: boolean
+  panelRef: RefObject<HTMLElement | null>
   onClose: () => void
   onStartDrag: (event: ReactPointerEvent<HTMLElement>, cell: StoredCellModel) => void
   onPermanentDelete: (id: string) => void
@@ -75,12 +78,19 @@ type DeletedTextPanelProps = {
 export function DeletedTextPanel({
   deletedBoxes,
   isOpen,
+  isDropTarget,
+  panelRef,
   onClose,
   onStartDrag,
   onPermanentDelete,
 }: DeletedTextPanelProps) {
   return (
-    <aside className={`deleted-panel ${isOpen ? 'is-open' : ''}`} aria-label="Storage" aria-hidden={!isOpen}>
+    <aside
+      ref={panelRef}
+      className={`deleted-panel ${isOpen ? 'is-open' : ''} ${isDropTarget ? 'is-drop-target' : ''}`}
+      aria-label="Storage"
+      aria-hidden={!isOpen}
+    >
       <div className="deleted-panel-header">
         <div>
           <h2>Storage</h2>

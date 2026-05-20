@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { PointerEvent as ReactPointerEvent } from 'react'
 import type { Editor } from '@tiptap/react'
-import { Package, PackageOpen, ScrollText, Settings } from 'lucide-react'
+import { ListTodo, Package, PackageOpen, ScrollText, Settings } from 'lucide-react'
 import {
   CELL_CONTROL_INSET,
   CLICK_DRIFT,
@@ -37,6 +37,9 @@ import { ConfirmationDialog } from './ConfirmationDialog'
 import type { ConfirmationRequest } from './ConfirmationDialog'
 import { LayerRail } from './LayerRail'
 import type { LayerDragState, LayerReleaseState } from './LayerRail'
+import { TodoPanel } from './TodoPanel'
+import { getUncheckedTodoCount, setTodoChecked } from './todoUtils'
+import type { TodoItem } from './todoUtils'
 import { useDocumentPersistence } from './useDocumentPersistence'
 import { createDocumentSnapshot, useDocumentStore, screenToWorld } from './store'
 import type { CellModel, DocumentSettings, NotariseDocument, SearchAnimationPreset, StoredCellModel } from './store'
@@ -300,6 +303,7 @@ export function App() {
   const editorShellRef = useRef<HTMLDivElement>(null)
   const workspaceRef = useRef<HTMLDivElement>(null)
   const trashRef = useRef<HTMLButtonElement>(null)
+  const storagePanelRef = useRef<HTMLElement>(null)
   const editorsRef = useRef<Map<string, Editor>>(new Map())
   const copiedCellIdRef = useRef<string | null>(null)
   const deletedCellUndoStackRef = useRef<CellModel[]>([])
@@ -321,7 +325,9 @@ export function App() {
   const [isCanvasMoving, setIsCanvasMoving] = useState(false)
   const [isSearchJumping, setIsSearchJumping] = useState(false)
   const [isTrashOpen, setIsTrashOpen] = useState(false)
+  const [isTodoOpen, setIsTodoOpen] = useState(false)
   const [isTrashHot, setIsTrashHot] = useState(false)
+  const [draggedBoxId, setDraggedBoxId] = useState<string | null>(null)
   const [isSettingsOpen, setIsSettingsOpen] = useState(false)
   const [visualLayer, setVisualLayer] = useState<number | null>(null)
   const [workspaceSize, setWorkspaceSize] = useState({ width: 0, height: 0 })
@@ -450,6 +456,7 @@ export function App() {
     layerSet.add(activeLayer)
     return [...layerSet].sort((a, b) => b - a)
   }, [activeLayer, boxes, layerTitles])
+  const uncheckedTodoCount = useMemo(() => getUncheckedTodoCount(boxes), [boxes])
 
   const layerBounds = useMemo(() => {
     const layerSet = new Set(boxes.map((box) => box.layer))
@@ -580,22 +587,30 @@ export function App() {
     }
   }
 
-  const isPointInTrash = (clientX: number, clientY: number) => {
-    const trashBox = trashRef.current?.getBoundingClientRect()
-
-    if (!trashBox) {
+  const isPointInRect = (rect: DOMRect | undefined, clientX: number, clientY: number) => {
+    if (!rect) {
       return false
     }
 
+    return clientX >= rect.left && clientX <= rect.right && clientY >= rect.top && clientY <= rect.bottom
+  }
+
+  const isPointInTrash = (clientX: number, clientY: number) => {
+    return isPointInRect(trashRef.current?.getBoundingClientRect(), clientX, clientY)
+  }
+
+  const isPointInStorageDropTarget = (clientX: number, clientY: number) => {
     return (
-      clientX >= trashBox.left &&
-      clientX <= trashBox.right &&
-      clientY >= trashBox.top &&
-      clientY <= trashBox.bottom
+      isPointInTrash(clientX, clientY) ||
+      (isTrashOpen && isPointInRect(storagePanelRef.current?.getBoundingClientRect(), clientX, clientY))
     )
   }
 
   const isPointInStorageSurface = (clientX: number, clientY: number) => {
+    if (isTrashOpen && isPointInRect(storagePanelRef.current?.getBoundingClientRect(), clientX, clientY)) {
+      return true
+    }
+
     const element = document.elementFromPoint(clientX, clientY)
     return Boolean(element?.closest('.deleted-panel, .trash-bucket'))
   }
@@ -878,7 +893,7 @@ export function App() {
     if (drag?.type === 'box') {
       const dx = (clientX - drag.startX) / viewport.zoom
       const dy = (clientY - drag.startY) / viewport.zoom
-      setIsTrashHot(isPointInTrash(clientX, clientY))
+      setIsTrashHot(isPointInStorageDropTarget(clientX, clientY))
       updateBox(drag.boxId, {
         x: Math.round(drag.boxX + dx),
         y: Math.round(drag.boxY + dy),
@@ -949,9 +964,10 @@ export function App() {
       return false
     }
 
-    const deletedBoxId = drag.type === 'box' && isPointInTrash(clientX, clientY) ? drag.boxId : null
+    const deletedBoxId = drag.type === 'box' && isPointInStorageDropTarget(clientX, clientY) ? drag.boxId : null
     const restoredBoxId = drag.type === 'storage' ? drag.boxId : null
     dragRef.current = null
+    setDraggedBoxId(null)
     setIsPanning(false)
     setIsTrashHot(false)
     scheduleTextSizeUiHide(0)
@@ -1572,7 +1588,8 @@ export function App() {
       boxY: box.y,
     }
     setIsCanvasMoving(true)
-    setIsTrashHot(isPointInTrash(event.clientX, event.clientY))
+    setDraggedBoxId(box.id)
+    setIsTrashHot(isPointInStorageDropTarget(event.clientX, event.clientY))
   }
 
   const startResize = (event: ReactPointerEvent<HTMLButtonElement>, box: CellModel) => {
@@ -1710,6 +1727,18 @@ export function App() {
     }
   }
 
+  const setTodoCheckedFromPanel = (todo: TodoItem, checked: boolean) => {
+    const currentCell = useDocumentStore.getState().boxes.find((box) => box.id === todo.cell.id)
+
+    if (!currentCell) {
+      return
+    }
+
+    updateBox(currentCell.id, {
+      content: setTodoChecked(currentCell.content, todo.path, checked),
+    })
+  }
+
   const dotSpacing = DOT_SPACING * viewport.zoom
   const activeDragType = dragRef.current?.type
   const shouldSnapCanvas = !isCanvasMoving &&
@@ -1728,7 +1757,7 @@ export function App() {
   ) * (180 / Math.PI)
 
   return (
-    <main className={`app ${isPanning ? 'is-panning' : ''} ${isCanvasMoving ? 'is-canvas-moving' : ''} ${isSearchJumping ? 'is-search-jumping' : ''} ${selectedBoxId ? 'has-selected-cell' : ''}`}>
+    <main className={`app ${isPanning ? 'is-panning' : ''} ${isCanvasMoving ? 'is-canvas-moving' : ''} ${isSearchJumping ? 'is-search-jumping' : ''} ${selectedBoxId ? 'has-selected-cell' : ''} ${draggedBoxId ? 'is-cell-dragging' : ''}`}>
       <header className="toolbar" aria-label="Document controls">
         <div className="brand">
           <ScrollText size={18} aria-hidden="true" />
@@ -1770,6 +1799,18 @@ export function App() {
         >
           {isTrashHot ? <PackageOpen size={25} aria-hidden="true" /> : <Package size={25} aria-hidden="true" />}
           {deletedBoxes.length > 0 && <span className="trash-count">{deletedBoxes.length}</span>}
+        </button>
+
+        <button
+          className={`todo-bucket ${isTodoOpen ? 'is-open' : ''}`}
+          type="button"
+          onClick={() => setIsTodoOpen((open) => !open)}
+          title="Todos"
+          aria-label="Todos"
+          aria-pressed={isTodoOpen}
+        >
+          <ListTodo size={25} aria-hidden="true" />
+          {uncheckedTodoCount > 0 && <span className="trash-count">{uncheckedTodoCount}</span>}
         </button>
 
         <button
@@ -1850,6 +1891,7 @@ export function App() {
                 backgroundLayerBlur={settings.backgroundLayerBlur}
                 searchFocusLayer={searchFocusLayer}
                 searchBrightnessPulse={searchBrightnessPulse}
+                isDragging={draggedBoxId === box.id}
                 onSelect={selectBoxWithEmptyCleanup}
                 onStartDrag={startBoxDrag}
                 onDelete={deleteCellWithConfirmation}
@@ -1887,9 +1929,23 @@ export function App() {
       <DeletedTextPanel
         deletedBoxes={deletedBoxes}
         isOpen={isTrashOpen}
+        isDropTarget={isTrashHot}
+        panelRef={storagePanelRef}
         onClose={() => setIsTrashOpen(false)}
         onStartDrag={startStorageDrag}
         onPermanentDelete={permanentlyDeleteCellWithConfirmation}
+      />
+
+      <TodoPanel
+        cells={boxes}
+        isOpen={isTodoOpen}
+        getLayerTitle={getLayerTitle}
+        onClose={() => setIsTodoOpen(false)}
+        onTodoSelect={(cell) => {
+          jumpToCell(cell)
+          setIsTodoOpen(false)
+        }}
+        onTodoCheckChange={setTodoCheckedFromPanel}
       />
 
       {storageDragPreview && (
