@@ -237,7 +237,9 @@ export const CanvasTextBox = memo(function CanvasTextBox({
         zIndex: layerZIndex,
         fontSize: box.fontSize ?? 12,
         borderWidth: 1 / viewportZoom,
+        '--cell-border-width': `${1 / viewportZoom}px`,
         '--control-scale': controlScale,
+        '--drag-dot-radius': `${1.25 / viewportZoom}px`,
       } as CSSProperties}
       onPointerDown={(event) => {
         if (event.button === 1) {

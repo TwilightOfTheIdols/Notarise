@@ -128,7 +128,9 @@ export function CanvasCellDragPreview({ cell, x, y, zoom }: CanvasCellDragPrevie
             background: 'transparent',
             fontSize: cell.fontSize,
             borderWidth: 1 / zoom,
+            '--cell-border-width': `${1 / zoom}px`,
             '--control-scale': controlScale,
+            '--drag-dot-radius': `${1.25 / zoom}px`,
           } as CSSProperties}
         >
           <button className="dragbar" type="button" aria-label="Drag cell" tabIndex={-1}>

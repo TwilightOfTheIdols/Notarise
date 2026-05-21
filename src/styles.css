@@ -421,7 +421,7 @@ button {
   position: absolute;
   display: grid;
   grid-template-rows: auto 1fr;
-  border: 1px solid var(--active-line);
+  border: var(--cell-border-width, 1px) solid transparent;
   border-radius: 6px;
   color: var(--text);
   background: transparent;
@@ -432,6 +432,17 @@ button {
     filter 180ms ease,
     transform 220ms cubic-bezier(0.22, 1, 0.36, 1),
     border-color 160ms ease;
+}
+
+.text-box::after {
+  content: "";
+  position: absolute;
+  z-index: 8;
+  inset: 0;
+  border: var(--cell-border-width, 1px) solid var(--active-line);
+  border-radius: inherit;
+  pointer-events: none;
+  transition: border-color 160ms ease;
 }
 
 .is-search-jumping .text-box {
@@ -445,8 +456,8 @@ button {
     border-color 160ms ease;
 }
 
-.text-box.is-selected,
-.text-box:focus-within {
+.text-box.is-selected::after,
+.text-box:focus-within::after {
   border-color: var(--text);
 }
 
@@ -495,16 +506,41 @@ button {
 }
 
 .dragbar {
-  left: calc(8px * var(--control-scale, 1));
-  top: calc(8px * var(--control-scale, 1));
-  width: calc(28px * var(--control-scale, 1));
-  height: calc(24px * var(--control-scale, 1));
-  border-radius: calc(7px * var(--control-scale, 1));
+  left: 0;
+  top: 0;
+  width: calc(56px * var(--control-scale, 1));
+  height: calc(32px * var(--control-scale, 1));
+  border-top-color: transparent;
+  border-left-color: transparent;
+  border-radius: 6px 0 calc(7px * var(--control-scale, 1)) 0;
   cursor: grab;
 }
 
 .dragbar:active {
+  border-top-color: transparent;
+  border-left-color: transparent;
   cursor: grabbing;
+}
+
+.dragbar:hover,
+.dragbar:active {
+  border-top-color: transparent;
+  border-left-color: transparent;
+}
+
+.dragbar::before {
+  content: "";
+  position: absolute;
+  inset: 22%;
+  background:
+    radial-gradient(circle at 8% 12%, currentColor 0 var(--drag-dot-radius, 1px), transparent calc(var(--drag-dot-radius, 1px) + 0.35px)),
+    radial-gradient(circle at 50% 12%, currentColor 0 var(--drag-dot-radius, 1px), transparent calc(var(--drag-dot-radius, 1px) + 0.35px)),
+    radial-gradient(circle at 92% 12%, currentColor 0 var(--drag-dot-radius, 1px), transparent calc(var(--drag-dot-radius, 1px) + 0.35px)),
+    radial-gradient(circle at 8% 88%, currentColor 0 var(--drag-dot-radius, 1px), transparent calc(var(--drag-dot-radius, 1px) + 0.35px)),
+    radial-gradient(circle at 50% 88%, currentColor 0 var(--drag-dot-radius, 1px), transparent calc(var(--drag-dot-radius, 1px) + 0.35px)),
+    radial-gradient(circle at 92% 88%, currentColor 0 var(--drag-dot-radius, 1px), transparent calc(var(--drag-dot-radius, 1px) + 0.35px));
+  background-repeat: no-repeat;
+  opacity: 0.74;
 }
 
 .cell-delete-handle {
@@ -539,11 +575,14 @@ button {
   grid-area: 1 / 1;
 }
 
-.dragbar svg,
 .scale-handle svg,
 .todo-handle svg {
   width: calc(16px * var(--control-scale, 1));
   height: calc(16px * var(--control-scale, 1));
+}
+
+.dragbar svg {
+  display: none;
 }
 
 .resize-handle svg {
@@ -576,6 +615,12 @@ button {
   width: calc(28px * var(--control-scale, 1));
   height: calc(24px * var(--control-scale, 1));
   border-radius: calc(7px * var(--control-scale, 1));
+}
+
+.todo-handle:hover,
+.todo-handle:active {
+  border-top-color: transparent;
+  border-right-color: transparent;
 }
 
 .text-editor {

@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import type { JSONContent } from '@tiptap/react'
-import { isEmptyDocumentContent } from './contentUtils'
+import { getContentText, isEmptyDocumentContent } from './contentUtils'
 
 export type Theme = 'light' | 'dark'
 export type SearchAnimationPreset = 'normal' | 'instant'
@@ -34,7 +34,7 @@ export type StoredCellModel = CellModel & {
   deletedAt: number
 }
 
-export type NotariseDocument = {
+export type NotariseDocumentV1 = {
   version: 1
   boxes: CellModel[]
   storage: StoredCellModel[]
@@ -45,6 +45,21 @@ export type NotariseDocument = {
   settings?: Partial<DocumentSettings>
   updatedAt: number
 }
+
+export type NotariseVirtualFile = {
+  mediaType: 'application/json' | 'text/markdown' | 'text/plain'
+  content: unknown
+}
+
+export type NotariseDocumentV2 = {
+  version: 2
+  kind: 'notarise.virtual-file-bundle'
+  manifestPath: 'manifest.json'
+  files: Record<string, NotariseVirtualFile>
+  updatedAt: number
+}
+
+export type NotariseDocument = NotariseDocumentV1 | NotariseDocumentV2
 
 export type DocumentState = {
   boxes: CellModel[]
@@ -117,6 +132,548 @@ const cloneContent = (content: JSONContent): JSONContent => {
   return typeof structuredClone === 'function'
     ? structuredClone(content)
     : JSON.parse(JSON.stringify(content)) as JSONContent
+}
+
+const isRecord = (value: unknown): value is Record<string, unknown> => {
+  return typeof value === 'object' && value !== null
+}
+
+const getJsonFileContent = <T,>(document: NotariseDocumentV2, path: string): T | null => {
+  const file = document.files[path]
+
+  if (!file || file.mediaType !== 'application/json') {
+    return null
+  }
+
+  return file.content as T
+}
+
+const slugify = (value: string) => {
+  const slug = value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+
+  return slug || 'untitled'
+}
+
+const layerPathSegment = (layer: number, title: string) => {
+  const prefix = layer < 0
+    ? `neg-${String(Math.abs(layer)).padStart(4, '0')}`
+    : String(layer).padStart(4, '0')
+
+  return `${prefix}-${slugify(title || `layer-${layer}`)}`
+}
+
+const getLayerTitleForSnapshot = (layerTitles: Record<number, string>, layer: number) => {
+  return layerTitles[layer]?.trim() || `Layer ${layer}`
+}
+
+const collectImageCount = (value: unknown): number => {
+  if (!isRecord(value)) {
+    return 0
+  }
+
+  const selfCount = value.type === 'image' ? 1 : 0
+  const children = Array.isArray(value.content) ? value.content : []
+  return selfCount + children.reduce((count, child) => count + collectImageCount(child), 0)
+}
+
+type TodoIndexEntry = {
+  cellId: string
+  layer: number
+  checked: boolean
+  text: string
+  path: number[]
+}
+
+const collectTodoIndexEntries = (
+  node: unknown,
+  cell: CellModel,
+  todos: TodoIndexEntry[],
+  path: number[],
+) => {
+  if (!isRecord(node)) {
+    return
+  }
+
+  if (node.type === 'taskItem') {
+    todos.push({
+      cellId: cell.id,
+      layer: cell.layer,
+      checked: isRecord(node.attrs) && node.attrs.checked === true,
+      text: getContentText(node) || 'Untitled todo',
+      path,
+    })
+  }
+
+  if (!Array.isArray(node.content)) {
+    return
+  }
+
+  node.content.forEach((child, index) => {
+    collectTodoIndexEntries(child, cell, todos, [...path, index])
+  })
+}
+
+const textNode = (text: string): JSONContent => ({
+  type: 'text',
+  text,
+})
+
+const taskLinePattern = /^\s*[-*]\s+\[([ xX])\]\s*(.*)$/
+
+const createParagraphNode = (line: string): JSONContent => ({
+  type: 'paragraph',
+  content: line ? [textNode(line)] : undefined,
+})
+
+const createTaskItemNode = (line: string): JSONContent | null => {
+  const match = line.match(taskLinePattern)
+
+  if (!match) {
+    return null
+  }
+
+  const text = match[2] ?? ''
+
+  return {
+    type: 'taskItem',
+    attrs: {
+      checked: match[1].toLowerCase() === 'x',
+    },
+    content: [
+      createParagraphNode(text),
+    ],
+  }
+}
+
+const plainTextToContent = (plainText: string): JSONContent => {
+  const lines = plainText.replace(/\r\n/g, '\n').split('\n')
+  const content: JSONContent[] = []
+  let pendingTasks: JSONContent[] = []
+
+  const flushTasks = () => {
+    if (pendingTasks.length === 0) {
+      return
+    }
+
+    content.push({
+      type: 'taskList',
+      content: pendingTasks,
+    })
+    pendingTasks = []
+  }
+
+  ;(lines.length > 0 ? lines : ['']).forEach((line) => {
+    const taskItem = createTaskItemNode(line)
+
+    if (taskItem) {
+      pendingTasks.push(taskItem)
+      return
+    }
+
+    flushTasks()
+    content.push(createParagraphNode(line))
+  })
+
+  flushTasks()
+
+  return {
+    type: 'doc',
+    content,
+  }
+}
+
+const collectInlineMarkdown = (node: unknown): string => {
+  if (!isRecord(node)) {
+    return ''
+  }
+
+  if (typeof node.text === 'string') {
+    return node.text
+  }
+
+  if (node.type === 'image') {
+    return '![image](embedded-image)'
+  }
+
+  if (!Array.isArray(node.content)) {
+    return ''
+  }
+
+  return node.content.map(collectInlineMarkdown).join('')
+}
+
+const contentToMarkdownBlocks = (node: unknown, depth = 0): string[] => {
+  if (!isRecord(node)) {
+    return []
+  }
+
+  if (node.type === 'paragraph') {
+    return [collectInlineMarkdown(node)]
+  }
+
+  if (node.type === 'heading') {
+    const level = isRecord(node.attrs) && typeof node.attrs.level === 'number' ? node.attrs.level : 2
+    return [`${'#'.repeat(Math.min(Math.max(level, 1), 6))} ${collectInlineMarkdown(node)}`]
+  }
+
+  if (node.type === 'bulletList' && Array.isArray(node.content)) {
+    return node.content.map((child) => `${'  '.repeat(depth)}- ${collectInlineMarkdown(child)}`)
+  }
+
+  if (node.type === 'orderedList' && Array.isArray(node.content)) {
+    return node.content.map((child, index) => `${'  '.repeat(depth)}${index + 1}. ${collectInlineMarkdown(child)}`)
+  }
+
+  if (node.type === 'taskList' && Array.isArray(node.content)) {
+    return node.content.map((child) => {
+      const checked = isRecord(child) && isRecord(child.attrs) && child.attrs.checked === true
+      return `${'  '.repeat(depth)}- [${checked ? 'x' : ' '}] ${collectInlineMarkdown(child)}`
+    })
+  }
+
+  if (node.type === 'image') {
+    return ['![image](embedded-image)']
+  }
+
+  if (!Array.isArray(node.content)) {
+    return []
+  }
+
+  return node.content.flatMap((child) => contentToMarkdownBlocks(child, depth))
+}
+
+const contentToMarkdown = (content: JSONContent) => {
+  return contentToMarkdownBlocks(content).join('\n\n').trim()
+}
+
+type BundleCellFile = {
+  id: string
+  layer: number
+  x: number
+  y: number
+  width: number
+  height: number
+  fontSize: number
+  zOrder: number
+  deletedAt?: number
+  plainText: string
+  markdown: string
+  content: JSONContent
+}
+
+const createCellFile = (cell: CellModel | StoredCellModel, zOrder: number): BundleCellFile => ({
+  id: cell.id,
+  layer: cell.layer,
+  x: cell.x,
+  y: cell.y,
+  width: cell.width,
+  height: cell.height,
+  fontSize: cell.fontSize,
+  zOrder,
+  deletedAt: 'deletedAt' in cell ? cell.deletedAt : undefined,
+  plainText: getContentText(cell.content),
+  markdown: contentToMarkdown(cell.content),
+  content: cell.content,
+})
+
+const cellFromBundleFile = (file: BundleCellFile): CellModel => {
+  const contentText = getContentText(file.content)
+  const content = typeof file.plainText === 'string' && file.plainText !== contentText
+    ? plainTextToContent(file.plainText)
+    : file.content
+
+  return {
+    id: file.id,
+    layer: Number(file.layer),
+    x: Math.round(Number(file.x) || 0),
+    y: Math.round(Number(file.y) || 0),
+    width: Math.max(1, Math.round(Number(file.width) || DEFAULT_PAGE_WIDTH)),
+    height: Math.max(1, Math.round(Number(file.height) || DEFAULT_BOX_HEIGHT)),
+    fontSize: Math.max(1, Math.round(Number(file.fontSize) || DEFAULT_FONT_SIZE)),
+    content,
+  }
+}
+
+const createLegacySnapshot = (state: DocumentState): NotariseDocumentV1 => ({
+  version: 1,
+  boxes: state.boxes,
+  storage: state.deletedBoxes,
+  layerTitles: state.layerTitles,
+  activeLayer: state.activeLayer,
+  viewport: state.viewport,
+  theme: state.theme,
+  settings: state.settings,
+  updatedAt: Date.now(),
+})
+
+const createVirtualFileBundle = (legacy: NotariseDocumentV1): NotariseDocumentV2 => {
+  const files: Record<string, NotariseVirtualFile> = {}
+  const layerSet = new Set<number>()
+  const cellIndex: Array<Record<string, unknown>> = []
+  const searchIndex: Array<Record<string, unknown>> = []
+  const todos: TodoIndexEntry[] = []
+  const updatedAt = Date.now()
+
+  legacy.boxes.forEach((cell) => layerSet.add(cell.layer))
+  legacy.storage.forEach((cell) => layerSet.add(cell.layer))
+  Object.entries(legacy.layerTitles).forEach(([layer, title]) => {
+    if (title.trim()) {
+      layerSet.add(Number(layer))
+    }
+  })
+
+  const layerPaths = new Map<number, string>()
+  ;[...layerSet].sort((a, b) => b - a).forEach((layer) => {
+    const title = getLayerTitleForSnapshot(legacy.layerTitles, layer)
+    const layerPath = `layers/${layerPathSegment(layer, title)}`
+    layerPaths.set(layer, layerPath)
+
+    files[`${layerPath}/layer.json`] = {
+      mediaType: 'application/json',
+      content: {
+        layer,
+        title,
+        active: layer === legacy.activeLayer,
+      },
+    }
+  })
+
+  legacy.boxes.forEach((cell, index) => {
+    const title = getLayerTitleForSnapshot(legacy.layerTitles, cell.layer)
+    const layerPath = layerPaths.get(cell.layer) ?? `layers/${layerPathSegment(cell.layer, title)}`
+    const cellPath = `${layerPath}/cells/${cell.id}`
+    const cellFile = createCellFile(cell, index)
+    const text = cellFile.plainText
+    const markdown = cellFile.markdown
+    const cellTodos: TodoIndexEntry[] = []
+    collectTodoIndexEntries(cell.content, cell, cellTodos, [])
+    todos.push(...cellTodos)
+
+    files[`${cellPath}.json`] = {
+      mediaType: 'application/json',
+      content: cellFile,
+    }
+    files[`${cellPath}.md`] = {
+      mediaType: 'text/markdown',
+      content: [
+        `# Cell ${cell.id}`,
+        '',
+        `Layer: ${cell.layer} (${title})`,
+        `Position: ${cell.x}, ${cell.y}`,
+        `Size: ${cell.width} x ${cell.height}`,
+        '',
+        markdown || text || '',
+      ].join('\n'),
+    }
+
+    const indexEntry = {
+      id: cell.id,
+      layer: cell.layer,
+      layerTitle: title,
+      jsonPath: `${cellPath}.json`,
+      markdownPath: `${cellPath}.md`,
+      x: cell.x,
+      y: cell.y,
+      width: cell.width,
+      height: cell.height,
+      fontSize: cell.fontSize,
+      textLength: text.length,
+      preview: text.slice(0, 180),
+      imageCount: collectImageCount(cell.content),
+      todoCount: cellTodos.length,
+      uncheckedTodoCount: cellTodos.filter((todo) => !todo.checked).length,
+    }
+
+    cellIndex.push(indexEntry)
+    searchIndex.push({
+      id: cell.id,
+      layer: cell.layer,
+      layerTitle: title,
+      text,
+      markdownPath: `${cellPath}.md`,
+      jsonPath: `${cellPath}.json`,
+    })
+  })
+
+  legacy.storage.forEach((cell, index) => {
+    const cellPath = `storage/cells/${cell.id}`
+    const cellFile = createCellFile(cell, index)
+
+    files[`${cellPath}.json`] = {
+      mediaType: 'application/json',
+      content: cellFile,
+    }
+    files[`${cellPath}.md`] = {
+      mediaType: 'text/markdown',
+      content: cellFile.markdown || cellFile.plainText || '',
+    }
+  })
+
+  const layerIndex = [...layerPaths.entries()].map(([layer, path]) => ({
+    layer,
+    title: getLayerTitleForSnapshot(legacy.layerTitles, layer),
+    path,
+    cellCount: legacy.boxes.filter((cell) => cell.layer === layer).length,
+  }))
+
+  files['manifest.json'] = {
+    mediaType: 'application/json',
+    content: {
+      app: 'Notarise',
+      format: 'virtual-file-bundle',
+      formatVersion: 2,
+      updatedAt,
+      activeLayer: legacy.activeLayer,
+      viewport: legacy.viewport,
+      theme: legacy.theme,
+      settings: legacy.settings,
+      layerIndexPath: 'indexes/layers.json',
+      cellIndexPath: 'indexes/cells.json',
+      searchIndexPath: 'indexes/search.json',
+      todoIndexPath: 'indexes/todos.json',
+      appDocumentPath: 'app/document.json',
+      llmGuidePath: 'LLM_README.md',
+      robotsPath: 'ROBOTS.txt',
+    },
+  }
+  files['app/document.json'] = {
+    mediaType: 'application/json',
+    content: legacy,
+  }
+  files['indexes/layers.json'] = {
+    mediaType: 'application/json',
+    content: layerIndex,
+  }
+  files['indexes/cells.json'] = {
+    mediaType: 'application/json',
+    content: cellIndex,
+  }
+  files['indexes/search.json'] = {
+    mediaType: 'application/json',
+    content: searchIndex,
+  }
+  files['indexes/todos.json'] = {
+    mediaType: 'application/json',
+    content: todos,
+  }
+  files['LLM_README.md'] = {
+    mediaType: 'text/markdown',
+    content: [
+      '# Notarise LLM guide',
+      '',
+      'This .notarise file is a single JSON file that behaves like a virtual file bundle.',
+      '',
+      '- Start with `manifest.json` and `indexes/search.json` for cheap discovery.',
+      '- Read individual cells through their `markdownPath` or `jsonPath` from `indexes/cells.json`.',
+      '- To write a cell cheaply, edit that cell JSON file\'s `plainText` field. On import, Notarise will rebuild the cell content from `plainText` if it differs from the rich `content` text.',
+      '- TODOs in `plainText` can be written as `- [ ] unchecked item` or `- [x] checked item`; Notarise imports those lines as real TODO boxes.',
+      '- To add a cell, create a new `layers/.../cells/<id>.json` file with the same fields as existing cell JSON files. Updating `indexes/cells.json` helps search, but Notarise also discovers cell JSON files under layer folders during import.',
+      '- To rename a layer, edit that layer folder\'s `layer.json` title.',
+      '- For exact rich formatting, edit the cell JSON file\'s `content` field using Tiptap JSON.',
+      '- Layer folders are organizational. Cell identity is always the stable `id` field.',
+    ].join('\n'),
+  }
+  files['ROBOTS.txt'] = {
+    mediaType: 'text/plain',
+    content: [
+      'User-agent: *',
+      'Application: Notarise',
+      'Format: notarise.virtual-file-bundle v2',
+      '',
+      'Purpose:',
+      'This document stores a spatial layered canvas made of editable cells. Agents should prefer scoped reads and writes instead of loading or rewriting the whole document.',
+      '',
+      'Discovery:',
+      '- Read manifest.json first.',
+      '- Use indexes/search.json for text search.',
+      '- Use indexes/cells.json to locate individual cell JSON and markdown paths.',
+      '- Use indexes/todos.json to inspect TODO text and checked state.',
+      '',
+      'Safe write contract:',
+      '- Prefer editing a target cell JSON file under layers/.../cells/<cell-id>.json.',
+      '- For simple text edits, update plainText. Notarise will rebuild the rich cell content from plainText when it changes.',
+      '- Preserve the id field. Cell identity is the id, not the file path.',
+      '- To create TODO boxes from plainText, use lines like "- [ ] item" or "- [x] item".',
+      '- To preserve exact rich formatting, edit content using Tiptap JSON instead of plainText.',
+      '- To add a cell, create a new layer cell JSON file with id, layer, x, y, width, height, fontSize, zOrder, plainText, markdown, and content fields.',
+      '- To rename a layer, edit layers/.../layer.json title.',
+      '',
+      'Avoid:',
+      '- Do not rewrite app/document.json unless intentionally replacing the full app snapshot.',
+      '- Do not rely on layer folder names as stable identifiers.',
+      '- Do not remove indexes unless rebuilding them.',
+    ].join('\n'),
+  }
+
+  return {
+    version: 2,
+    kind: 'notarise.virtual-file-bundle',
+    manifestPath: 'manifest.json',
+    files,
+    updatedAt,
+  }
+}
+
+const getDocumentFromBundle = (document: NotariseDocumentV2): NotariseDocumentV1 => {
+  const fallback = getJsonFileContent<NotariseDocumentV1>(document, 'app/document.json')
+
+  if (!fallback) {
+    throw new Error('This Notarise bundle is missing app/document.json.')
+  }
+
+  const cellIndex = getJsonFileContent<Array<{ jsonPath?: unknown }>>(document, 'indexes/cells.json') ?? []
+  const indexedCellPaths = cellIndex
+    .map((entry) => entry.jsonPath)
+    .filter((path): path is string => typeof path === 'string')
+  const discoveredCellPaths = Object.keys(document.files)
+    .filter((path) => path.startsWith('layers/') && path.includes('/cells/') && path.endsWith('.json'))
+  const cellPaths = [...new Set([...indexedCellPaths, ...discoveredCellPaths])]
+  const boxes = cellPaths
+    .flatMap((path) => {
+      const cellFile = getJsonFileContent<BundleCellFile>(document, path)
+      return cellFile ? [{ cell: cellFromBundleFile(cellFile), zOrder: Number(cellFile.zOrder) || 0 }] : []
+    })
+    .sort((a, b) => a.zOrder - b.zOrder)
+    .map(({ cell }) => cell)
+  const storage = Object.entries(document.files)
+    .filter(([path, file]) => path.startsWith('storage/cells/') && path.endsWith('.json') && file.mediaType === 'application/json')
+    .flatMap(([, file]) => {
+      const cellFile = file.content as BundleCellFile
+      const cell = cellFromBundleFile(cellFile)
+      return [{
+        ...cell,
+        deletedAt: Number(cellFile.deletedAt) || Date.now(),
+      }]
+    })
+  const layerTitles = Object.entries(document.files)
+    .filter(([path, file]) => path.startsWith('layers/') && path.endsWith('/layer.json') && file.mediaType === 'application/json')
+    .reduce<Record<number, string>>((titles, [, file]) => {
+      const layerFile = file.content
+
+      if (!isRecord(layerFile) || typeof layerFile.layer !== 'number' || typeof layerFile.title !== 'string') {
+        return titles
+      }
+
+      return {
+        ...titles,
+        [layerFile.layer]: layerFile.title,
+      }
+    }, fallback.layerTitles)
+
+  return {
+    ...fallback,
+    boxes: boxes.length > 0 ? boxes : fallback.boxes,
+    storage,
+    layerTitles,
+  }
+}
+
+const getRenderableDocument = (document: NotariseDocument): NotariseDocumentV1 => {
+  return document.version === 2 ? getDocumentFromBundle(document) : document
 }
 
 type LegacySettings = Partial<DocumentSettings> & {
@@ -210,17 +767,9 @@ const clampNavigableLayer = (
   return clamp(layer, bounds.bottom - 1, bounds.top + 1)
 }
 
-export const createDocumentSnapshot = (state: DocumentState): NotariseDocument => ({
-  version: 1,
-  boxes: state.boxes,
-  storage: state.deletedBoxes,
-  layerTitles: state.layerTitles,
-  activeLayer: state.activeLayer,
-  viewport: state.viewport,
-  theme: state.theme,
-  settings: state.settings,
-  updatedAt: Date.now(),
-})
+export const createDocumentSnapshot = (state: DocumentState): NotariseDocument => {
+  return createVirtualFileBundle(createLegacySnapshot(state))
+}
 
 export const useDocumentStore = create<DocumentState>((set, get) => ({
   boxes: [],
@@ -516,22 +1065,23 @@ export const useDocumentStore = create<DocumentState>((set, get) => ({
     set({ settings: DEFAULT_SETTINGS })
   },
   hydrateDocument: (document) => {
-    const boxes = document.boxes ?? []
-    const layerTitles = document.layerTitles ?? {}
-    const activeLayer = clampNavigableLayer(document.activeLayer ?? 1, {
+    const renderableDocument = getRenderableDocument(document)
+    const boxes = renderableDocument.boxes ?? []
+    const layerTitles = renderableDocument.layerTitles ?? {}
+    const activeLayer = clampNavigableLayer(renderableDocument.activeLayer ?? 1, {
       boxes,
       layerTitles,
-      activeLayer: document.activeLayer ?? 1,
+      activeLayer: renderableDocument.activeLayer ?? 1,
     })
 
     set({
       boxes,
-      deletedBoxes: document.storage ?? [],
+      deletedBoxes: renderableDocument.storage ?? [],
       layerTitles,
       activeLayer,
-      viewport: document.viewport ?? { x: 120, y: 96, zoom: 1 },
-      theme: document.theme ?? 'light',
-      settings: normalizeSettings(document.settings),
+      viewport: renderableDocument.viewport ?? { x: 120, y: 96, zoom: 1 },
+      theme: renderableDocument.theme ?? 'light',
+      settings: normalizeSettings(renderableDocument.settings),
       selectedBoxId: null,
     })
   },

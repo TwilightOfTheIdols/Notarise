@@ -187,11 +187,30 @@ const isRecord = (value: unknown): value is Record<string, unknown> => {
 const parseNotariseDocument = (text: string): NotariseDocument => {
   const parsed: unknown = JSON.parse(text)
 
-  if (!isRecord(parsed) || parsed.version !== 1 || !Array.isArray(parsed.boxes)) {
+  if (!isRecord(parsed)) {
     throw new Error('This does not look like a valid Notarise document.')
   }
 
-  return parsed as NotariseDocument
+  if (parsed.version === 1 && Array.isArray(parsed.boxes)) {
+    return parsed as NotariseDocument
+  }
+
+  if (
+    parsed.version === 2 &&
+    parsed.kind === 'notarise.virtual-file-bundle' &&
+    isRecord(parsed.files)
+  ) {
+    return parsed as NotariseDocument
+  }
+
+  throw new Error('This does not look like a valid Notarise document.')
+}
+
+const withUpdatedAt = (document: NotariseDocument): NotariseDocument => {
+  return {
+    ...document,
+    updatedAt: Date.now(),
+  }
 }
 
 const readTextFile = (file: File) => {
@@ -321,6 +340,7 @@ export function App() {
   const textSizeWheelDeltaRef = useRef(0)
   const fontSizeLabelFrameRef = useRef<number | null>(null)
   const layerReleaseFrameRef = useRef<number | null>(null)
+  const compassAngleRef = useRef(0)
   const [isPanning, setIsPanning] = useState(false)
   const [isCanvasMoving, setIsCanvasMoving] = useState(false)
   const [isSearchJumping, setIsSearchJumping] = useState(false)
@@ -893,7 +913,18 @@ export function App() {
     if (drag?.type === 'box') {
       const dx = (clientX - drag.startX) / viewport.zoom
       const dy = (clientY - drag.startY) / viewport.zoom
+      const moved = Math.hypot(clientX - drag.startX, clientY - drag.startY)
+
       setIsTrashHot(isPointInStorageDropTarget(clientX, clientY))
+
+      if (moved <= CLICK_DRIFT && draggedBoxId !== drag.boxId) {
+        return
+      }
+
+      if (moved > CLICK_DRIFT && draggedBoxId !== drag.boxId) {
+        setDraggedBoxId(drag.boxId)
+      }
+
       updateBox(drag.boxId, {
         x: Math.round(drag.boxX + dx),
         y: Math.round(drag.boxY + dy),
@@ -1588,7 +1619,6 @@ export function App() {
       boxY: box.y,
     }
     setIsCanvasMoving(true)
-    setDraggedBoxId(box.id)
     setIsTrashHot(isPointInStorageDropTarget(event.clientX, event.clientY))
   }
 
@@ -1659,10 +1689,7 @@ export function App() {
         setFontSizeRowLabels([])
         setStorageDragPreview(null)
         setVisualLayer(null)
-        hydrateDocument({
-          ...document,
-          updatedAt: Date.now(),
-        })
+        hydrateDocument(withUpdatedAt(document))
       },
     })
   }
@@ -1741,10 +1768,7 @@ export function App() {
 
   const dotSpacing = DOT_SPACING * viewport.zoom
   const activeDragType = dragRef.current?.type
-  const shouldSnapCanvas = !isCanvasMoving &&
-    !isPanning &&
-    !isSearchJumping &&
-    activeDragType !== 'canvas'
+  const shouldSnapCanvas = !isPanning && !isSearchJumping && activeDragType !== 'canvas'
   const surfaceX = shouldSnapCanvas ? snapToDevicePixel(viewport.x) : viewport.x
   const surfaceY = shouldSnapCanvas ? snapToDevicePixel(viewport.y) : viewport.y
   const workspaceCenterX = (workspaceSize.width || window.innerWidth) / 2
@@ -1759,10 +1783,13 @@ export function App() {
         y: workspaceRect.top + surfaceY + draggedBox.y * viewport.zoom,
       }
     : null
-  const compassAngle = Math.atan2(
+  const rawCompassAngle = Math.atan2(
     viewport.x - workspaceSize.width / 2,
     -(viewport.y - workspaceSize.height / 2),
   ) * (180 / Math.PI)
+  const compassDelta = ((((rawCompassAngle - compassAngleRef.current) % 360) + 540) % 360) - 180
+  compassAngleRef.current += compassDelta
+  const compassAngle = compassAngleRef.current
 
   return (
     <main className={`app ${isPanning ? 'is-panning' : ''} ${isCanvasMoving ? 'is-canvas-moving' : ''} ${isSearchJumping ? 'is-search-jumping' : ''} ${selectedBoxId ? 'has-selected-cell' : ''} ${draggedBoxId ? 'is-cell-dragging' : ''}`}>
