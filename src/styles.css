@@ -392,10 +392,6 @@ button {
   will-change: transform;
 }
 
-.is-cell-dragging .surface-grid {
-  z-index: 40;
-}
-
 .dot-matrix {
   position: absolute;
   inset: 0;
@@ -1384,6 +1380,33 @@ button {
 
 .storage-drag-preview-content .text-editor {
   min-height: 100%;
+}
+
+.canvas-drag-preview {
+  position: fixed;
+  z-index: 80;
+  overflow: visible;
+  color: var(--text);
+  pointer-events: none;
+}
+
+.canvas-drag-preview-frame {
+  position: relative;
+  transform-origin: left top;
+}
+
+.canvas-drag-preview .text-box {
+  pointer-events: none;
+  transition: none;
+}
+
+.canvas-drag-preview .dragbar,
+.canvas-drag-preview .cell-delete-handle,
+.canvas-drag-preview .resize-handle,
+.canvas-drag-preview .scale-handle,
+.canvas-drag-preview .todo-handle {
+  opacity: 1;
+  pointer-events: none;
 }
 
 .text-size-wheel-picker {

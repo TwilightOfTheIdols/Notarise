@@ -1,12 +1,12 @@
-import type { PointerEvent as ReactPointerEvent } from 'react'
+import type { CSSProperties, PointerEvent as ReactPointerEvent } from 'react'
 import { useEffect } from 'react'
 import type { RefObject } from 'react'
 import { EditorContent, useEditor } from '@tiptap/react'
-import { Trash2, X } from 'lucide-react'
+import { Grip, ListTodo, Maximize2, Trash2, Type, X } from 'lucide-react'
 import { EMPTY_DOCUMENT_CONTENT } from './constants'
 import { extractTextPreview } from './contentUtils'
 import { createEditorExtensions } from './editorConfig'
-import type { StoredCellModel } from './store'
+import type { CellModel, StoredCellModel } from './store'
 
 type StorageDragPreviewProps = {
   cell: StoredCellModel | null
@@ -60,6 +60,94 @@ export function StorageDragPreview({ cell, x, y, zoom }: StorageDragPreviewProps
         }}
       >
         <EditorContent editor={editor} />
+      </div>
+    </div>
+  )
+}
+
+type CanvasCellDragPreviewProps = {
+  cell: CellModel | null
+  x: number
+  y: number
+  zoom: number
+}
+
+export function CanvasCellDragPreview({ cell, x, y, zoom }: CanvasCellDragPreviewProps) {
+  const editor = useEditor({
+    extensions: createEditorExtensions({ imageResize: false }),
+    content: cell?.content ?? EMPTY_DOCUMENT_CONTENT,
+    editable: false,
+    editorProps: {
+      attributes: {
+        class: 'text-editor',
+      },
+    },
+    immediatelyRender: false,
+  })
+
+  useEffect(() => {
+    if (!editor || !cell) {
+      return
+    }
+
+    editor.commands.setContent(cell.content)
+  }, [cell, editor])
+
+  if (!cell) {
+    return null
+  }
+
+  const controlScale = (1 + zoom) / (2 * zoom)
+
+  return (
+    <div
+      className="canvas-drag-preview"
+      style={{
+        left: x,
+        top: y,
+        width: cell.width * zoom,
+        minHeight: cell.height * zoom,
+      }}
+    >
+      <div
+        className="canvas-drag-preview-frame"
+        style={{
+          width: cell.width,
+          minHeight: cell.height,
+          transform: `scale(${zoom})`,
+        }}
+      >
+        <article
+          className="text-box is-selected is-active-layer"
+          style={{
+            left: 0,
+            top: 0,
+            width: cell.width,
+            minHeight: cell.height,
+            opacity: 1,
+            background: 'transparent',
+            fontSize: cell.fontSize,
+            borderWidth: 1 / zoom,
+            '--control-scale': controlScale,
+          } as CSSProperties}
+        >
+          <button className="dragbar" type="button" aria-label="Drag cell" tabIndex={-1}>
+            <Grip size={14} aria-hidden="true" />
+          </button>
+          <button className="cell-delete-handle" type="button" aria-label="Delete cell" tabIndex={-1}>
+            <Trash2 size={13} aria-hidden="true" />
+          </button>
+          <button className="scale-handle" type="button" aria-label="Scale text" tabIndex={-1}>
+            <Type size={14} strokeWidth={2.4} aria-hidden="true" />
+          </button>
+          <button className="todo-handle" type="button" aria-label="Insert todo" tabIndex={-1}>
+            <ListTodo size={14} strokeWidth={2.2} aria-hidden="true" />
+          </button>
+          <EditorContent editor={editor} />
+          <button className="resize-handle" type="button" aria-label="Resize cell" tabIndex={-1}>
+            <Maximize2 size={13} aria-hidden="true" />
+          </button>
+        </article>
       </div>
     </div>
   )

@@ -28,7 +28,7 @@ import {
 } from './editorBehaviors'
 import type { FontSizeSegment } from './editorBehaviors'
 import { createImageDocumentContent, getImageFilesFromClipboard, isEmptyDocumentContent, readFileAsDataUrl } from './contentUtils'
-import { DeletedTextPanel, StorageDragPreview } from './StoragePanel'
+import { CanvasCellDragPreview, DeletedTextPanel, StorageDragPreview } from './StoragePanel'
 import { TextSizeWheelPicker } from './TextSizeWheel'
 import { GlobalSearch } from './GlobalSearch'
 import { SettingsPanel } from './SettingsPanel'
@@ -1751,6 +1751,14 @@ export function App() {
   const workspaceCenterY = (workspaceSize.height || window.innerHeight) / 2
   const viewportCenterWorldX = (workspaceCenterX - surfaceX) / viewport.zoom
   const viewportCenterWorldY = (workspaceCenterY - surfaceY) / viewport.zoom
+  const draggedBox = draggedBoxId ? boxes.find((box) => box.id === draggedBoxId) ?? null : null
+  const workspaceRect = workspaceRef.current?.getBoundingClientRect()
+  const draggedBoxScreenPoint = draggedBox && workspaceRect
+    ? {
+        x: workspaceRect.left + surfaceX + draggedBox.x * viewport.zoom,
+        y: workspaceRect.top + surfaceY + draggedBox.y * viewport.zoom,
+      }
+    : null
   const compassAngle = Math.atan2(
     viewport.x - workspaceSize.width / 2,
     -(viewport.y - workspaceSize.height / 2),
@@ -1953,6 +1961,15 @@ export function App() {
           cell={deletedBoxes.find((box) => box.id === storageDragPreview.boxId) ?? null}
           x={storageDragPreview.x}
           y={storageDragPreview.y}
+          zoom={viewport.zoom}
+        />
+      )}
+
+      {draggedBox && draggedBoxScreenPoint && (
+        <CanvasCellDragPreview
+          cell={draggedBox}
+          x={draggedBoxScreenPoint.x}
+          y={draggedBoxScreenPoint.y}
           zoom={viewport.zoom}
         />
       )}
