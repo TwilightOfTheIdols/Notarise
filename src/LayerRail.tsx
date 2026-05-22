@@ -1,5 +1,5 @@
 import type { CSSProperties, PointerEvent as ReactPointerEvent } from 'react'
-import { Circle } from 'lucide-react'
+import { Circle, Plus } from 'lucide-react'
 
 export type LayerDragState = {
   layer: number
@@ -23,7 +23,10 @@ type LayerRailProps = {
   activeLayer: number
   dragState: LayerDragState | null
   releaseState: LayerReleaseState | null
+  topCreateLayer: number
+  bottomCreateLayer: number
   getLayerTitle: (layer: number) => string
+  onCreateLayer: (layer: number) => void
   onPointerDown: (event: ReactPointerEvent<HTMLButtonElement>, layer: number) => void
   onPointerMove: (event: ReactPointerEvent<HTMLButtonElement>) => void
   onPointerUp: (event: ReactPointerEvent<HTMLButtonElement>) => void
@@ -34,16 +37,46 @@ export function LayerRail({
   activeLayer,
   dragState,
   releaseState,
+  topCreateLayer,
+  bottomCreateLayer,
   getLayerTitle,
+  onCreateLayer,
   onPointerDown,
   onPointerMove,
   onPointerUp,
 }: LayerRailProps) {
+  const createLayerButton = (layer: number, position: 'top' | 'bottom') => {
+    if (layers.includes(layer)) {
+      return null
+    }
+
+    const title = getLayerTitle(layer)
+
+    return (
+      <button
+        key={`create-${position}-${layer}`}
+        className="layer-dot layer-create-dot"
+        type="button"
+        title={`Create ${title}`}
+        aria-label={`Create ${title}`}
+        onPointerDown={(event) => {
+          event.preventDefault()
+          event.stopPropagation()
+          onCreateLayer(layer)
+        }}
+      >
+        <Circle size={13} strokeWidth={2} />
+        <Plus size={13} strokeWidth={2.6} />
+      </button>
+    )
+  }
+
   return (
     <nav
       className={`layer-rail ${releaseState?.phase === 'hold' ? 'is-layer-committing' : ''}`}
       aria-label="Layers"
     >
+      {createLayerButton(topCreateLayer, 'top')}
       {layers.map((layer) => {
         const isDraggingLayer = dragState?.isDragging && dragState.layer === layer
         const isReleasingLayer = releaseState?.layer === layer
@@ -97,6 +130,7 @@ export function LayerRail({
           </button>
         )
       })}
+      {createLayerButton(bottomCreateLayer, 'bottom')}
     </nav>
   )
 }

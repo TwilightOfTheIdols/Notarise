@@ -12,6 +12,7 @@ import {
 } from './editorBehaviors'
 import { useDocumentStore } from './store'
 import type { CellModel, Theme } from './store'
+import { toggleTodoRows } from './todoToggle'
 
 const LAYER_FOCUS_BLEND_DISTANCE = 0.35
 
@@ -201,7 +202,15 @@ export const CanvasTextBox = memo(function CanvasTextBox({
     ? 3000 + displayLayer
     : 1000 + displayLayer
   const insertTodo = () => {
-    editor?.chain().focus().insertContent({
+    if (!editor) {
+      return
+    }
+
+    if (toggleTodoRows(editor)) {
+      return
+    }
+
+    editor.chain().focus().insertContent({
       type: 'taskList',
       content: [
         {

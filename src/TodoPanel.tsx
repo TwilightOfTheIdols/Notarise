@@ -53,7 +53,7 @@ export function TodoPanel({ cells, isOpen, getLayerTitle, onClose, onTodoSelect,
     <aside className={`todo-panel ${isOpen ? 'is-open' : ''}`} aria-label="Open todos" aria-hidden={!isOpen}>
       <div className="todo-panel-header">
         <div className="todo-panel-title">
-          <h2>Todos</h2>
+          <h2>TODOs</h2>
           <p>{todoCount} {showChecked ? 'shown' : 'unchecked'}</p>
           <label className="todo-show-checked-toggle">
             <input

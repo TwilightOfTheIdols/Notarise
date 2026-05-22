@@ -142,7 +142,12 @@ export const getTodoLayerGroups = (
     layerGroups.set(cell.layer, layerGroup)
   })
 
-  return [...layerGroups.values()].sort((a, b) => b.layer - a.layer)
+  return [...layerGroups.values()]
+    .map((group) => ({
+      ...group,
+      cells: [...group.cells].sort((a, b) => a.cell.y - b.cell.y || a.cell.x - b.cell.x),
+    }))
+    .sort((a, b) => b.layer - a.layer)
 }
 
 export const getTodoChecked = (content: JSONContent, path: number[]): boolean | null => {

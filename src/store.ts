@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import type { JSONContent } from '@tiptap/react'
 import { getContentText, isEmptyDocumentContent } from './contentUtils'
+import { getDefaultLayerTitle } from './layerTitleUtils'
 
 export type Theme = 'light' | 'dark'
 export type SearchAnimationPreset = 'normal' | 'instant'
@@ -79,6 +80,8 @@ export type DocumentState = {
   restoreRemovedBox: (box: CellModel) => void
   restoreBox: (id: string, point: { x: number; y: number }, layer: number) => void
   permanentlyDeleteBox: (id: string) => void
+  removeLayer: (layer: number) => void
+  restoreLayer: (layer: number, boxes: CellModel[], title: string | undefined) => void
   selectBox: (id: string | null) => void
   setViewport: (viewport: Viewport) => void
   panBy: (dx: number, dy: number) => void
@@ -789,9 +792,10 @@ export const useDocumentStore = create<DocumentState>((set, get) => ({
   },
   createBoxWithContent: (point, content) => {
     const id = nextId()
+    const layer = get().activeLayer
     const box: CellModel = {
       id,
-      layer: get().activeLayer,
+      layer,
       x: Math.round(point.x - DEFAULT_TEXT_INSET_X),
       y: Math.round(point.y - DEFAULT_TEXT_INSET_Y),
       width: DEFAULT_PAGE_WIDTH,
@@ -802,6 +806,12 @@ export const useDocumentStore = create<DocumentState>((set, get) => ({
 
     set((state) => ({
       boxes: [...removeEmptySelectedCell(state), box],
+      layerTitles: state.layerTitles[layer]?.trim()
+        ? state.layerTitles
+        : {
+            ...state.layerTitles,
+            [layer]: getDefaultLayerTitle(),
+          },
       selectedBoxId: id,
     }))
 
@@ -871,6 +881,12 @@ export const useDocumentStore = create<DocumentState>((set, get) => ({
         ...removeEmptySelectedCell(state).filter((candidate) => candidate.id !== box.id),
         box,
       ],
+      layerTitles: state.layerTitles[box.layer]?.trim()
+        ? state.layerTitles
+        : {
+            ...state.layerTitles,
+            [box.layer]: getDefaultLayerTitle(),
+          },
       activeLayer: box.layer,
       selectedBoxId: box.id,
     }))
@@ -898,6 +914,12 @@ export const useDocumentStore = create<DocumentState>((set, get) => ({
           },
         ],
         deletedBoxes: state.deletedBoxes.filter((candidate) => candidate.id !== id),
+        layerTitles: state.layerTitles[layer]?.trim()
+          ? state.layerTitles
+          : {
+              ...state.layerTitles,
+              [layer]: getDefaultLayerTitle(),
+            },
         selectedBoxId: box.id,
       }
     })
@@ -905,6 +927,43 @@ export const useDocumentStore = create<DocumentState>((set, get) => ({
   permanentlyDeleteBox: (id) => {
     set((state) => ({
       deletedBoxes: state.deletedBoxes.filter((box) => box.id !== id),
+    }))
+  },
+  removeLayer: (layer) => {
+    set((state) => {
+      const boxes = removeEmptySelectedCell(state)
+      const nextBoxes = boxes.filter((box) => box.layer !== layer)
+      const nextLayerTitles = { ...state.layerTitles }
+      delete nextLayerTitles[layer]
+      const remainingLayers = getContentLayers({
+        boxes: nextBoxes,
+        layerTitles: nextLayerTitles,
+      }, nextBoxes)
+      const lowerLayer = remainingLayers.filter((candidate) => candidate < layer).sort((a, b) => b - a)[0]
+      const upperLayer = remainingLayers.filter((candidate) => candidate > layer).sort((a, b) => a - b)[0]
+
+      return {
+        boxes: nextBoxes,
+        layerTitles: nextLayerTitles,
+        activeLayer: lowerLayer ?? upperLayer ?? layer,
+        selectedBoxId: null,
+      }
+    })
+  },
+  restoreLayer: (layer, restoredBoxes, title) => {
+    set((state) => ({
+      boxes: [
+        ...removeEmptySelectedCell(state).filter((box) => box.layer !== layer),
+        ...restoredBoxes,
+      ],
+      layerTitles: title?.trim()
+        ? {
+            ...state.layerTitles,
+            [layer]: title,
+          }
+        : state.layerTitles,
+      activeLayer: layer,
+      selectedBoxId: null,
     }))
   },
   selectBox: (id) => {

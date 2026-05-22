@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { PointerEvent as ReactPointerEvent } from 'react'
 import type { Editor } from '@tiptap/react'
-import { ListTodo, Package, PackageOpen, ScrollText, Settings } from 'lucide-react'
+import { ListTodo, Package, PackageOpen, ScrollText, Settings, Trash2 } from 'lucide-react'
 import {
   CELL_CONTROL_INSET,
   CLICK_DRIFT,
@@ -40,6 +40,7 @@ import type { LayerDragState, LayerReleaseState } from './LayerRail'
 import { TodoPanel } from './TodoPanel'
 import { getUncheckedTodoCount, setTodoChecked } from './todoUtils'
 import type { TodoItem } from './todoUtils'
+import { getDefaultLayerTitle } from './layerTitleUtils'
 import { useDocumentPersistence } from './useDocumentPersistence'
 import { createDocumentSnapshot, useDocumentStore, screenToWorld } from './store'
 import type { CellModel, DocumentSettings, NotariseDocument, SearchAnimationPreset, StoredCellModel } from './store'
@@ -107,6 +108,20 @@ type FontSizeRowLabel = {
   y: number
   size: number
 }
+
+type DeletedLayerUndo = {
+  type: 'layer'
+  layer: number
+  title: string | undefined
+  boxes: CellModel[]
+}
+
+type DeletedCellUndo = {
+  type: 'cell'
+  cell: CellModel
+}
+
+type DeleteUndoAction = DeletedCellUndo | DeletedLayerUndo
 
 type TextSizeDialState = {
   boxId: string
@@ -317,6 +332,8 @@ export function App() {
   const restoreRemovedBox = useDocumentStore((state) => state.restoreRemovedBox)
   const restoreBox = useDocumentStore((state) => state.restoreBox)
   const permanentlyDeleteBox = useDocumentStore((state) => state.permanentlyDeleteBox)
+  const removeLayer = useDocumentStore((state) => state.removeLayer)
+  const restoreLayer = useDocumentStore((state) => state.restoreLayer)
   const hydrateDocument = useDocumentStore((state) => state.hydrateDocument)
 
   const editorShellRef = useRef<HTMLDivElement>(null)
@@ -325,7 +342,7 @@ export function App() {
   const storagePanelRef = useRef<HTMLElement>(null)
   const editorsRef = useRef<Map<string, Editor>>(new Map())
   const copiedCellIdRef = useRef<string | null>(null)
-  const deletedCellUndoStackRef = useRef<CellModel[]>([])
+  const deletedUndoStackRef = useRef<DeleteUndoAction[]>([])
   const lastCanvasPointRef = useRef<{ x: number; y: number } | null>(null)
   const dragRef = useRef<DragMode>(null)
   const pressRef = useRef<PressState>(null)
@@ -506,8 +523,14 @@ export function App() {
   const frontLayer = visualLayer === null ? activeLayer : visibleActiveLayer
 
   const getLayerTitle = useCallback((layer: number) => {
-    return layerTitles[layer]?.trim() || `Layer ${layer}`
-  }, [layerTitles])
+    const title = layerTitles[layer]?.trim()
+
+    if (title) {
+      return title
+    }
+
+    return boxes.some((box) => box.layer === layer) ? `Layer ${layer}` : getDefaultLayerTitle()
+  }, [boxes, layerTitles])
 
   const getLayerDragTargetIndex = (drag: LayerDragState, clientY: number) => {
     const rowStep = Math.max(1, drag.rowHeight + 6)
@@ -854,16 +877,26 @@ export function App() {
         return
       }
 
-      const cell = deletedCellUndoStackRef.current.pop()
+      const action = deletedUndoStackRef.current.pop()
 
-      if (!cell) {
+      if (!action) {
         return
       }
 
       event.preventDefault()
       event.stopPropagation()
-      restoreRemovedBox(cloneCellForUndo(cell))
-      focusCellEditor(cell.id)
+
+      if (action.type === 'cell') {
+        restoreRemovedBox(cloneCellForUndo(action.cell))
+        focusCellEditor(action.cell.id)
+        return
+      }
+
+      restoreLayer(
+        action.layer,
+        action.boxes.map(cloneCellForUndo),
+        action.title,
+      )
     }
 
     window.addEventListener('keydown', handleUndoDeletedCell, { capture: true })
@@ -1648,8 +1681,38 @@ export function App() {
       title: 'Delete cell?',
       confirmLabel: 'Delete',
       onConfirm: () => {
-        deletedCellUndoStackRef.current.push(cloneCellForUndo(box))
+        deletedUndoStackRef.current.push({
+          type: 'cell',
+          cell: cloneCellForUndo(box),
+        })
         removeBox(box.id)
+      },
+    })
+  }
+
+  const deleteActiveLayerWithConfirmation = () => {
+    const layerBoxes = boxes
+      .filter((box) => box.layer === activeLayer)
+      .map(cloneCellForUndo)
+    const layerTitle = layerTitles[activeLayer]
+
+    if (layerBoxes.length === 0 && !layerTitle?.trim()) {
+      setLayer(activeLayer > layerBounds.bottom ? activeLayer - 1 : activeLayer + 1)
+      return
+    }
+
+    setConfirmationRequest({
+      title: 'Delete layer?',
+      confirmLabel: 'Delete',
+      onConfirm: () => {
+        deletedUndoStackRef.current.push({
+          type: 'layer',
+          layer: activeLayer,
+          title: layerTitle,
+          boxes: layerBoxes,
+        })
+        setVisualLayer(null)
+        removeLayer(activeLayer)
       },
     })
   }
@@ -1684,7 +1747,7 @@ export function App() {
       message: 'This replaces the current canvas with the selected file.',
       confirmLabel: 'Import',
       onConfirm: () => {
-        deletedCellUndoStackRef.current = []
+        deletedUndoStackRef.current = []
         setTextSizeDial(null)
         setFontSizeRowLabels([])
         setStorageDragPreview(null)
@@ -1803,7 +1866,7 @@ export function App() {
           <label className="layer-title-field">
             <input
               value={layerTitles[activeLayer] ?? ''}
-              placeholder={`Layer ${activeLayer}`}
+              placeholder={getLayerTitle(activeLayer)}
               aria-label="Layer title"
               onChange={(event) => setLayerTitle(activeLayer, event.target.value)}
             />
@@ -1873,12 +1936,28 @@ export function App() {
           </span>
         </button>
 
+        <button
+          className="layer-delete-button"
+          type="button"
+          onClick={deleteActiveLayerWithConfirmation}
+          title="Delete layer"
+          aria-label={`Delete ${getLayerTitle(activeLayer)}`}
+        >
+          <Trash2 size={24} aria-hidden="true" />
+        </button>
+
         <LayerRail
           layers={visibleLayerDots}
           activeLayer={visibleActiveLayer}
           dragState={layerDrag}
           releaseState={layerRelease}
+          topCreateLayer={layerBounds.top + 1}
+          bottomCreateLayer={layerBounds.bottom - 1}
           getLayerTitle={getLayerTitle}
+          onCreateLayer={(layer) => {
+            setVisualLayer(null)
+            setLayer(layer)
+          }}
           onPointerDown={startLayerDrag}
           onPointerMove={moveLayerDrag}
           onPointerUp={finishLayerDrag}
