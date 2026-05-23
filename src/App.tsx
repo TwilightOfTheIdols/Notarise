@@ -141,6 +141,8 @@ const TEXT_SIZE_UI_FADE_MS = 160
 const CONFIRMATION_UI_FADE_MS = 220
 const DOT_MATRIX_FADE_MS = 260
 const SEARCH_SETTLE_MS = 520
+const CELL_CULL_MARGIN_SCREEN = 900
+const MAX_RENDER_LAYER_DISTANCE = 3.1
 const CSS_EASE = (() => {
   const x1 = 0.25
   const y1 = 0.1
@@ -1253,6 +1255,24 @@ export function App() {
     searchJumpAnimationRef.current = window.requestAnimationFrame(animate)
   }
 
+  const jumpToLayer = (layer: number) => {
+    if (originAnimationRef.current !== null) {
+      window.cancelAnimationFrame(originAnimationRef.current)
+      originAnimationRef.current = null
+    }
+    if (searchJumpAnimationRef.current !== null) {
+      window.cancelAnimationFrame(searchJumpAnimationRef.current)
+      searchJumpAnimationRef.current = null
+    }
+
+    deselectCurrentBox()
+    setIsSearchJumping(false)
+    resetSearchBrightness()
+    setVisualLayer(null)
+    setLayer(layer)
+    settleCanvasMovement(120)
+  }
+
   useEffect(() => {
     const handlePointerMove = (event: PointerEvent) => {
       if (dragRef.current) {
@@ -1846,6 +1866,44 @@ export function App() {
         y: workspaceRect.top + surfaceY + draggedBox.y * viewport.zoom,
       }
     : null
+  const visibleBoxes = useMemo(() => {
+    const workspaceWidth = workspaceSize.width || window.innerWidth
+    const workspaceHeight = workspaceSize.height || window.innerHeight
+    const margin = CELL_CULL_MARGIN_SCREEN / viewport.zoom
+    const left = -surfaceX / viewport.zoom - margin
+    const top = -surfaceY / viewport.zoom - margin
+    const right = (workspaceWidth - surfaceX) / viewport.zoom + margin
+    const bottom = (workspaceHeight - surfaceY) / viewport.zoom + margin
+
+    return boxes.filter((box) => {
+      if (box.id === selectedBoxId || box.id === draggedBoxId) {
+        return true
+      }
+
+      const displayLayer = layerPreviewMap?.get(box.layer) ?? box.layer
+      const layerDistance = Math.abs(displayLayer - visualLayerRenderPosition)
+
+      if (layerDistance > MAX_RENDER_LAYER_DISTANCE) {
+        return false
+      }
+
+      const boxRight = box.x + box.width
+      const boxBottom = box.y + box.height
+
+      return boxRight >= left && box.x <= right && boxBottom >= top && box.y <= bottom
+    })
+  }, [
+    boxes,
+    draggedBoxId,
+    layerPreviewMap,
+    selectedBoxId,
+    surfaceX,
+    surfaceY,
+    viewport.zoom,
+    visualLayerRenderPosition,
+    workspaceSize.height,
+    workspaceSize.width,
+  ])
   const rawCompassAngle = Math.atan2(
     viewport.x - workspaceSize.width / 2,
     -(viewport.y - workspaceSize.height / 2),
@@ -1987,7 +2045,7 @@ export function App() {
             }}
           >
             <div className="page-guide" aria-hidden="true" />
-            {boxes.map((box) => (
+            {visibleBoxes.map((box) => (
               <CanvasTextBox
                 key={box.id}
                 box={box}
@@ -2026,6 +2084,7 @@ export function App() {
         getLayerTitle={getLayerTitle}
         onActivate={deselectCurrentBox}
         onResultSelect={jumpToCell}
+        onLayerSelect={jumpToLayer}
       />
 
       <SettingsPanel

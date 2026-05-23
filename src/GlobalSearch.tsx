@@ -7,11 +7,16 @@ type SearchResult = {
   cell: CellModel
   layerTitle: string
   preview: string
-  matchedLayer: boolean
+  matchedText: boolean
 }
 
 type SearchIndexEntry = SearchResult & {
   searchableText: string
+}
+
+type LayerSearchResult = {
+  layer: number
+  title: string
   searchableLayer: string
 }
 
@@ -20,9 +25,10 @@ type GlobalSearchProps = {
   getLayerTitle: (layer: number) => string
   onActivate: () => void
   onResultSelect: (cell: CellModel) => void
+  onLayerSelect: (layer: number) => void
 }
 
-export function GlobalSearch({ cells, getLayerTitle, onActivate, onResultSelect }: GlobalSearchProps) {
+export function GlobalSearch({ cells, getLayerTitle, onActivate, onResultSelect, onLayerSelect }: GlobalSearchProps) {
   const searchRef = useRef<HTMLElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
   const [query, setQuery] = useState('')
@@ -39,11 +45,26 @@ export function GlobalSearch({ cells, getLayerTitle, onActivate, onResultSelect 
           cell,
           layerTitle,
           preview: summary.preview,
-          matchedLayer: false,
+          matchedText: false,
           searchableText: summary.text.toLocaleLowerCase(),
-          searchableLayer: layerTitle.toLocaleLowerCase(),
         }
       })
+  }, [cells, getLayerTitle])
+
+  const layerIndex = useMemo<LayerSearchResult[]>(() => {
+    const layers = [...new Set(cells.map((cell) => cell.layer))]
+
+    return layers
+      .map((layer) => {
+        const title = getLayerTitle(layer)
+
+        return {
+          layer,
+          title,
+          searchableLayer: title.toLocaleLowerCase(),
+        }
+      })
+      .sort((a, b) => b.layer - a.layer)
   }, [cells, getLayerTitle])
 
   const results = useMemo<SearchResult[]>(() => {
@@ -54,15 +75,10 @@ export function GlobalSearch({ cells, getLayerTitle, onActivate, onResultSelect 
     return searchIndex
       .map((result) => ({
         ...result,
-        matchedLayer: result.searchableLayer.includes(normalizedQuery),
         matchedText: result.searchableText.includes(normalizedQuery),
       }))
-      .filter((result) => result.matchedText || result.matchedLayer)
+      .filter((result) => result.matchedText)
       .sort((a, b) => {
-        if (a.matchedLayer !== b.matchedLayer) {
-          return a.matchedLayer ? -1 : 1
-        }
-
         if (a.cell.layer !== b.cell.layer) {
           return b.cell.layer - a.cell.layer
         }
@@ -71,9 +87,16 @@ export function GlobalSearch({ cells, getLayerTitle, onActivate, onResultSelect 
       })
   }, [normalizedQuery, searchIndex])
 
+  const layerResults = useMemo<LayerSearchResult[]>(() => {
+    if (!normalizedQuery) {
+      return []
+    }
+
+    return layerIndex.filter((result) => result.searchableLayer.includes(normalizedQuery))
+  }, [layerIndex, normalizedQuery])
+
   const isOpen = query.length > 0 && isResultsOpen
-  const layerResults = results.filter((result) => result.matchedLayer)
-  const cellResults = results.filter((result) => !result.matchedLayer)
+  const hasResults = layerResults.length > 0 || results.length > 0
 
   const renderResult = ({ cell, layerTitle, preview }: SearchResult) => (
     <button
@@ -91,6 +114,24 @@ export function GlobalSearch({ cells, getLayerTitle, onActivate, onResultSelect 
         <span className="global-search-layer-title">{layerTitle}</span>
       </span>
       <span className="global-search-preview">{preview || 'Empty cell'}</span>
+    </button>
+  )
+
+  const renderLayerResult = ({ layer, title }: LayerSearchResult) => (
+    <button
+      key={layer}
+      className="global-search-result global-search-layer-result"
+      type="button"
+      onClick={() => {
+        onLayerSelect(layer)
+        setQuery('')
+        inputRef.current?.blur()
+      }}
+    >
+      <span className="global-search-layer">
+        <b>{layer}</b>
+        <span className="global-search-layer-title">{title}</span>
+      </span>
     </button>
   )
 
@@ -163,20 +204,20 @@ export function GlobalSearch({ cells, getLayerTitle, onActivate, onResultSelect 
     <section ref={searchRef} className={`global-search ${isOpen ? 'is-open' : ''}`} aria-label="Global cell search">
       {isOpen && (
         <div className="global-search-results">
-          {results.length === 0 ? (
+          {!hasResults ? (
             <p className="global-search-empty">No matching cells or layers</p>
           ) : (
             <>
               {layerResults.length > 0 && (
                 <section className="global-search-section" aria-label="Layer matches">
                   <h3>Layers</h3>
-                  {layerResults.map(renderResult)}
+                  {layerResults.map(renderLayerResult)}
                 </section>
               )}
-              {cellResults.length > 0 && (
+              {results.length > 0 && (
                 <section className="global-search-section" aria-label="Cell matches">
                   <h3>Cells</h3>
-                  {cellResults.map(renderResult)}
+                  {results.map(renderResult)}
                 </section>
               )}
             </>

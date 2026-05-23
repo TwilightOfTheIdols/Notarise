@@ -1725,6 +1725,10 @@ button {
   cursor: pointer;
 }
 
+.global-search-layer-result {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .global-search-result:hover,
 .global-search-result:focus-visible {
   outline: none;
