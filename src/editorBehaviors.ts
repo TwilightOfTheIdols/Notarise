@@ -287,6 +287,48 @@ export function preserveFontSizeAfterEnter(view: Editor['view'], fallbackSize: n
   })
 }
 
+export function preserveLeadingTabsAfterEnter(view: Editor['view']) {
+  const { selection } = view.state
+
+  if (!selection.empty) {
+    return
+  }
+
+  const { $from } = selection
+  let textBlockDepth = -1
+
+  for (let depth = $from.depth; depth > 0; depth -= 1) {
+    const node = $from.node(depth)
+
+    if (node.type.name === 'taskItem' || node.type.name === 'listItem') {
+      return
+    }
+
+    if (textBlockDepth === -1 && node.isTextblock) {
+      textBlockDepth = depth
+    }
+  }
+
+  if (textBlockDepth === -1) {
+    return
+  }
+
+  const textBlock = $from.node(textBlockDepth)
+  const leadingTabs = textBlock.textContent.match(/^\t+/)?.[0] ?? ''
+
+  if (!leadingTabs) {
+    return
+  }
+
+  window.requestAnimationFrame(() => {
+    if (!view.state.selection.empty) {
+      return
+    }
+
+    view.dispatch(view.state.tr.insertText(leadingTabs).scrollIntoView())
+  })
+}
+
 function isBlankTextBlock(node: Editor['state']['doc']) {
   let isBlank = true
 
@@ -309,6 +351,104 @@ function isBlankTextBlock(node: Editor['state']['doc']) {
   })
 
   return isBlank
+}
+
+function getTaskSelectionContext(state: Editor['state']) {
+  const { selection } = state
+
+  if (!selection.empty) {
+    return null
+  }
+
+  const { $from } = selection
+  let textBlockDepth = -1
+  let taskItemDepth = -1
+  let taskListDepth = -1
+
+  for (let depth = $from.depth; depth > 0; depth -= 1) {
+    const node = $from.node(depth)
+
+    if (textBlockDepth === -1 && node.isTextblock) {
+      textBlockDepth = depth
+    }
+
+    if (taskItemDepth === -1 && node.type.name === 'taskItem') {
+      taskItemDepth = depth
+    }
+
+    if (taskListDepth === -1 && node.type.name === 'taskList') {
+      taskListDepth = depth
+    }
+  }
+
+  if (textBlockDepth === -1 || taskItemDepth === -1 || taskListDepth === -1) {
+    return null
+  }
+
+  return {
+    $from,
+    textBlockDepth,
+    taskItemDepth,
+    taskListDepth,
+    textBlock: $from.node(textBlockDepth),
+    taskItem: $from.node(taskItemDepth),
+  }
+}
+
+function isNestedTaskItem(context: NonNullable<ReturnType<typeof getTaskSelectionContext>>) {
+  return context.taskListDepth > 1 && context.$from.node(context.taskListDepth - 1).type.name === 'taskItem'
+}
+
+function isBlankTaskRow(context: NonNullable<ReturnType<typeof getTaskSelectionContext>>) {
+  return context.taskItem.childCount === 1 && isBlankTextBlock(context.textBlock)
+}
+
+export function handleTaskNestingKey(editor: Editor, event: KeyboardEvent) {
+  if (event.key !== 'Tab' && event.key !== 'Backspace') {
+    return false
+  }
+
+  const context = getTaskSelectionContext(editor.state)
+
+  if (!context) {
+    return false
+  }
+
+  const { $from, textBlockDepth } = context
+  const isAtTextBlockStart = $from.pos === $from.start(textBlockDepth)
+
+  if (event.key === 'Tab') {
+    if (event.shiftKey) {
+      event.preventDefault()
+      editor.commands.liftListItem('taskItem')
+      return true
+    }
+
+    if (!isBlankTaskRow(context)) {
+      return false
+    }
+
+    event.preventDefault()
+    editor.commands.sinkListItem('taskItem')
+    return true
+  }
+
+  if (
+    event.key === 'Backspace' &&
+    isAtTextBlockStart &&
+    isNestedTaskItem(context) &&
+    isBlankTaskRow(context)
+  ) {
+    const didLift = editor.commands.liftListItem('taskItem')
+
+    if (didLift) {
+      event.preventDefault()
+    }
+
+    return didLift
+  }
+
+  return false
 }
 
 function getListSelectionContext(state: Editor['state']) {

@@ -25,7 +25,7 @@ export function createEditorExtensions({ imageResize }: { imageResize: boolean }
     }),
     TaskList,
     TaskItem.configure({
-      nested: false,
+      nested: true,
     }),
     FontSizeMark,
     RowFontSize,

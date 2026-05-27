@@ -436,6 +436,27 @@ button {
   pointer-events: none;
 }
 
+.canvas-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none;
+  transform-origin: 0 0;
+  transition:
+    opacity 180ms ease,
+    filter 180ms ease,
+    transform 220ms cubic-bezier(0.22, 1, 0.36, 1);
+  will-change: transform, opacity, filter;
+}
+
+.canvas-layer.is-active-layer {
+  pointer-events: auto;
+}
+
+.is-search-jumping .canvas-layer {
+  transition: none;
+}
+
 .text-box {
   position: absolute;
   display: grid;
@@ -448,8 +469,6 @@ button {
   transform-origin: center center;
   transition:
     opacity 180ms ease,
-    filter 180ms ease,
-    transform 220ms cubic-bezier(0.22, 1, 0.36, 1),
     border-color 160ms ease;
 }
 
@@ -464,14 +483,9 @@ button {
   transition: border-color 160ms ease;
 }
 
-.is-search-jumping .text-box {
-  transition: border-color 160ms ease;
-}
-
 .text-box.is-dragging {
   transition:
     opacity 180ms ease,
-    filter 180ms ease,
     border-color 160ms ease;
 }
 
@@ -663,7 +677,7 @@ button {
 .text-editor li[data-checked] {
   display: flex !important;
   gap: 8px;
-  align-items: center;
+  align-items: flex-start;
   margin: 0;
   padding: 0;
   color: var(--text);
@@ -714,13 +728,24 @@ button {
   min-width: 0;
 }
 
+.text-editor li[data-type='taskItem'] ul[data-type='taskList'],
+.text-editor li[data-checked] ul[data-type='taskList'] {
+  margin-top: 0.12em;
+  padding-left: 1.45em;
+}
+
+.text-editor li[data-type='taskItem'] li[data-type='taskItem'],
+.text-editor li[data-checked] li[data-checked] {
+  margin-top: 0.08em;
+}
+
 .text-editor li[data-type='taskItem'] > div > p,
 .text-editor li[data-checked] > div > p {
   margin: 0;
 }
 
-.text-editor li[data-type='taskItem'][data-checked='true'] > div,
-.text-editor li[data-checked='true'] > div {
+.text-editor li[data-type='taskItem'][data-checked='true'] > div > p,
+.text-editor li[data-checked='true'] > div > p {
   color: var(--muted);
   text-decoration: line-through;
 }
@@ -1075,23 +1100,28 @@ button {
 
 .todo-show-checked-toggle span {
   position: relative;
-  width: 26px;
+  display: inline-block;
+  flex: 0 0 38px;
+  width: 38px;
   height: 16px;
-  border: 1px solid var(--hairline);
+  box-sizing: border-box;
+  border: 0;
   border-radius: 999px;
-  background: var(--control-bg);
+  background: var(--control-hover);
   transition:
-    background-color 160ms ease,
-    border-color 160ms ease;
+    background-color 160ms ease;
 }
 
 .todo-show-checked-toggle span::after {
   content: "";
   position: absolute;
-  top: 2px;
-  left: 2px;
-  width: 10px;
-  height: 10px;
+  top: 0;
+  left: 0;
+  display: block;
+  width: 16px;
+  height: 16px;
+  box-sizing: border-box;
+  border: 1px solid var(--hairline);
   border-radius: 999px;
   background: var(--muted);
   transition:
@@ -1100,13 +1130,12 @@ button {
 }
 
 .todo-show-checked-toggle input:checked + span {
-  border-color: var(--active-line);
   background: var(--control-hover);
 }
 
 .todo-show-checked-toggle input:checked + span::after {
   background: var(--text);
-  transform: translateX(10px);
+  transform: translateX(22px);
 }
 
 .todo-show-checked-toggle:hover {

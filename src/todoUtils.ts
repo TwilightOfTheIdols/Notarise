@@ -6,6 +6,7 @@ export type TodoItem = {
   text: string
   cell: CellModel
   path: number[]
+  depth: number
 }
 
 export type TodoCellGroup = {
@@ -40,6 +41,16 @@ const collectNodeText = (node: unknown): string => {
   return node.content.map(collectNodeText).join(' ')
 }
 
+const collectTaskItemLabelText = (node: Record<string, unknown>): string => {
+  if (!Array.isArray(node.content)) {
+    return ''
+  }
+
+  const firstParagraph = node.content.find((child) => isRecord(child) && child.type === 'paragraph')
+
+  return firstParagraph ? collectNodeText(firstParagraph) : ''
+}
+
 const getFirstTextBlock = (content: JSONContent): string => {
   const stack = [...(content.content ?? [])]
 
@@ -70,19 +81,21 @@ const collectTodos = (
   todos: TodoItem[],
   path: number[],
   includeChecked: boolean,
+  depth = 0,
 ) => {
   if (!isRecord(node)) {
     return
   }
 
   if (node.type === 'taskItem' && isRecord(node.attrs) && (includeChecked || node.attrs.checked !== true)) {
-    const text = collectNodeText(node).replace(/\s+/g, ' ').trim()
+    const text = collectTaskItemLabelText(node).replace(/\s+/g, ' ').trim()
 
     todos.push({
       id: `${cell.id}:${path.join('.')}`,
       text: text || 'Untitled todo',
       cell,
       path,
+      depth,
     })
   }
 
@@ -90,8 +103,10 @@ const collectTodos = (
     return
   }
 
+  const childDepth = node.type === 'taskItem' ? depth + 1 : depth
+
   node.content.forEach((child, index) => {
-    collectTodos(child, cell, todos, [...path, index], includeChecked)
+    collectTodos(child, cell, todos, [...path, index], includeChecked, childDepth)
   })
 }
 

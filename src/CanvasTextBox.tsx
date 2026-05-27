@@ -6,37 +6,22 @@ import { Grip, ListTodo, Maximize2, Trash2, Type } from 'lucide-react'
 import { createEditorExtensions } from './editorConfig'
 import {
   handleListDeletionKey,
+  handleTaskNestingKey,
+  preserveLeadingTabsAfterEnter,
   normalizeTaskItemFontSizes,
   preserveFontSizeAfterEnter,
   startImageResizeCorrection,
 } from './editorBehaviors'
 import { StaticTextContent } from './StaticTextContent'
 import { useDocumentStore } from './store'
-import type { CellModel, Theme } from './store'
+import type { CellModel } from './store'
 import { toggleTodoRows } from './todoToggle'
-
-const LAYER_FOCUS_BLEND_DISTANCE = 0.35
-
-const mix = (from: number, to: number, amount: number) => {
-  return from + (to - from) * amount
-}
 
 export type CanvasTextBoxProps = {
   box: CellModel
   isSelected: boolean
-  activeLayer: number
-  frontLayer: number
-  displayLayer: number
-  visualLayer: number
-  theme: Theme
-  viewportZoom: number
-  viewportCenterWorldX: number
-  viewportCenterWorldY: number
-  layerPanDepth: number
-  backgroundLayerBrightness: number
-  backgroundLayerBlur: number
-  searchFocusLayer: number | null
-  searchBrightnessPulse: number
+  isActiveLayer: boolean
+  shouldRenderEditor: boolean
   isDragging: boolean
   onSelect: (id: string | null) => void
   onStartDrag: (event: ReactPointerEvent<HTMLButtonElement>, box: CellModel) => void
@@ -52,7 +37,6 @@ export type CanvasTextBoxProps = {
 type ActiveTextBoxEditorProps = Pick<
   CanvasTextBoxProps,
   | 'box'
-  | 'viewportZoom'
   | 'onStartDrag'
   | 'onDelete'
   | 'onStartResize'
@@ -64,7 +48,6 @@ type ActiveTextBoxEditorProps = Pick<
 
 function ActiveTextBoxEditor({
   box,
-  viewportZoom,
   onStartDrag,
   onDelete,
   onStartResize,
@@ -90,11 +73,16 @@ function ActiveTextBoxEditor({
         },
       },
       handleKeyDown: (view, event) => {
+        if (editor && handleTaskNestingKey(editor, event)) {
+          return true
+        }
+
         if (handleListDeletionKey(view, event, box.fontSize ?? 12)) {
           return true
         }
 
         if (event.key === 'Enter') {
+          preserveLeadingTabsAfterEnter(view)
           preserveFontSizeAfterEnter(view, box.fontSize ?? 12)
           return false
         }
@@ -139,7 +127,7 @@ function ActiveTextBoxEditor({
     }
 
     const handleMouseDown = (event: MouseEvent) => {
-      startImageResizeCorrection(event, editor, viewportZoom)
+      startImageResizeCorrection(event, editor, useDocumentStore.getState().viewport.zoom)
     }
 
     editor.view.dom.addEventListener('mousedown', handleMouseDown, { capture: true })
@@ -147,7 +135,7 @@ function ActiveTextBoxEditor({
     return () => {
       editor.view.dom.removeEventListener('mousedown', handleMouseDown, { capture: true })
     }
-  }, [editor, viewportZoom])
+  }, [editor])
 
   useEffect(() => {
     if (!editor) {
@@ -251,19 +239,8 @@ function ActiveTextBoxEditor({
 export const CanvasTextBox = memo(function CanvasTextBox({
   box,
   isSelected,
-  activeLayer,
-  frontLayer,
-  displayLayer,
-  visualLayer,
-  theme,
-  viewportZoom,
-  viewportCenterWorldX,
-  viewportCenterWorldY,
-  layerPanDepth,
-  backgroundLayerBrightness,
-  backgroundLayerBlur,
-  searchFocusLayer,
-  searchBrightnessPulse,
+  isActiveLayer,
+  shouldRenderEditor,
   isDragging,
   onSelect,
   onStartDrag,
@@ -275,63 +252,19 @@ export const CanvasTextBox = memo(function CanvasTextBox({
   onEditorReady,
   onEditorDestroy,
 }: CanvasTextBoxProps) {
-  const signedLayerDistance = displayLayer - visualLayer
-  const layerDistance = Math.abs(signedLayerDistance)
-  const isLayerActive = box.layer === activeLayer
-  const shouldRenderEditor = isLayerActive || box.layer === searchFocusLayer
-  const isFrontLayer = displayLayer === frontLayer
-
-  const focusBlend = Math.max(0, Math.min(1, 1 - layerDistance / LAYER_FOCUS_BLEND_DISTANCE))
-  const backgroundBlend = 1 - focusBlend
-  const backgroundBlur = Math.min(24, layerDistance * backgroundLayerBlur)
-  const isCrossLayerSearch = searchFocusLayer !== null
-  const effectiveBackgroundVisibility = isCrossLayerSearch
-    ? backgroundLayerBrightness + (100 - backgroundLayerBrightness) * searchBrightnessPulse
-    : backgroundLayerBrightness
-  const backgroundVisibilityAmount = effectiveBackgroundVisibility / 100
-  const baseDepthOpacity = Math.max(0, 0.48 - layerDistance * 0.16)
-  const backgroundOpacity = baseDepthOpacity * backgroundVisibilityAmount
-  const depthOpacity = mix(backgroundOpacity, 1, focusBlend)
-  const backgroundBrightness = theme === 'light'
-    ? 1
-    : Math.max(0.62, 0.88 - Math.max(0, layerDistance - 1) * 0.08)
-  const depthBrightness = mix(backgroundBrightness, 1, focusBlend)
-  const depthBlur = backgroundBlur * backgroundBlend
-  const backgroundScale = Math.min(Math.max(1 + signedLayerDistance * 0.1, 0.45), 1.75)
-  const depthScale = mix(backgroundScale, 1, focusBlend)
-  const depthPanRatio = signedLayerDistance * (layerPanDepth / 100)
-  const depthPanX = -viewportCenterWorldX * depthPanRatio * backgroundBlend
-  const depthPanY = -viewportCenterWorldY * depthPanRatio * backgroundBlend
-  const depthTransformOrigin = `${-box.x}px ${-box.y}px`
-  const controlScale = (1 + viewportZoom) / (2 * viewportZoom)
-  const depthFilter = layerDistance === 0 ? undefined : `blur(${depthBlur}px) brightness(${depthBrightness})`
-  const depthTransform = layerDistance === 0
-    ? undefined
-    : `matrix(${depthScale}, 0, 0, ${depthScale}, ${depthPanX}, ${depthPanY})`
-  const layerZIndex = isFrontLayer
-    ? 3000 + displayLayer
-    : 1000 + displayLayer
   return (
     <article
-      className={`text-box ${isSelected ? 'is-selected' : ''} ${isLayerActive ? 'is-active-layer' : ''} ${isDragging ? 'is-dragging' : ''}`}
+      className={`text-box ${isSelected ? 'is-selected' : ''} ${isActiveLayer ? 'is-active-layer' : ''} ${isDragging ? 'is-dragging' : ''}`}
       data-box-id={box.id}
       style={{
         left: box.x,
         top: box.y,
         width: box.width,
         minHeight: box.height,
-        opacity: isDragging ? 0 : depthOpacity,
-        filter: depthFilter,
-        transform: depthTransform,
-        transformOrigin: depthTransformOrigin,
         background: 'transparent',
-        pointerEvents: isLayerActive ? 'auto' : 'none',
-        zIndex: layerZIndex,
+        opacity: isDragging ? 0 : undefined,
+        pointerEvents: isActiveLayer ? 'auto' : 'none',
         fontSize: box.fontSize ?? 12,
-        borderWidth: 1 / viewportZoom,
-        '--cell-border-width': `${1 / viewportZoom}px`,
-        '--control-scale': controlScale,
-        '--drag-dot-radius': `${1.25 / viewportZoom}px`,
       } as CSSProperties}
       onPointerDown={(event) => {
         if (event.button === 1) {
@@ -352,7 +285,6 @@ export const CanvasTextBox = memo(function CanvasTextBox({
       {shouldRenderEditor ? (
         <ActiveTextBoxEditor
           box={box}
-          viewportZoom={viewportZoom}
           onStartDrag={onStartDrag}
           onDelete={onDelete}
           onStartResize={onStartResize}

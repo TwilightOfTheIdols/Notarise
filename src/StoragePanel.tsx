@@ -1,11 +1,8 @@
 import type { CSSProperties, PointerEvent as ReactPointerEvent } from 'react'
-import { useEffect } from 'react'
 import type { RefObject } from 'react'
-import { EditorContent, useEditor } from '@tiptap/react'
 import { Grip, ListTodo, Maximize2, Trash2, Type, X } from 'lucide-react'
-import { EMPTY_DOCUMENT_CONTENT } from './constants'
 import { extractTextPreview } from './contentUtils'
-import { createEditorExtensions } from './editorConfig'
+import { StaticTextContent } from './StaticTextContent'
 import type { CellModel, StoredCellModel } from './store'
 
 type StorageDragPreviewProps = {
@@ -16,26 +13,6 @@ type StorageDragPreviewProps = {
 }
 
 export function StorageDragPreview({ cell, x, y, zoom }: StorageDragPreviewProps) {
-  const editor = useEditor({
-    extensions: createEditorExtensions({ imageResize: false }),
-    content: cell?.content ?? EMPTY_DOCUMENT_CONTENT,
-    editable: false,
-    editorProps: {
-      attributes: {
-        class: 'text-editor',
-      },
-    },
-    immediatelyRender: false,
-  })
-
-  useEffect(() => {
-    if (!editor || !cell) {
-      return
-    }
-
-    editor.commands.setContent(cell.content)
-  }, [cell, editor])
-
   if (!cell) {
     return null
   }
@@ -59,7 +36,7 @@ export function StorageDragPreview({ cell, x, y, zoom }: StorageDragPreviewProps
           transform: `scale(${zoom})`,
         }}
       >
-        <EditorContent editor={editor} />
+        <StaticTextContent content={cell.content} />
       </div>
     </div>
   )
@@ -73,26 +50,6 @@ type CanvasCellDragPreviewProps = {
 }
 
 export function CanvasCellDragPreview({ cell, x, y, zoom }: CanvasCellDragPreviewProps) {
-  const editor = useEditor({
-    extensions: createEditorExtensions({ imageResize: false }),
-    content: cell?.content ?? EMPTY_DOCUMENT_CONTENT,
-    editable: false,
-    editorProps: {
-      attributes: {
-        class: 'text-editor',
-      },
-    },
-    immediatelyRender: false,
-  })
-
-  useEffect(() => {
-    if (!editor || !cell) {
-      return
-    }
-
-    editor.commands.setContent(cell.content)
-  }, [cell, editor])
-
   if (!cell) {
     return null
   }
@@ -145,7 +102,7 @@ export function CanvasCellDragPreview({ cell, x, y, zoom }: CanvasCellDragPrevie
           <button className="todo-handle" type="button" aria-label="Insert todo" tabIndex={-1}>
             <ListTodo size={14} strokeWidth={2.2} aria-hidden="true" />
           </button>
-          <EditorContent editor={editor} />
+          <StaticTextContent content={cell.content} />
           <button className="resize-handle" type="button" aria-label="Resize cell" tabIndex={-1}>
             <Maximize2 size={13} aria-hidden="true" />
           </button>

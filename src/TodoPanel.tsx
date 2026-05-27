@@ -94,6 +94,7 @@ export function TodoPanel({ cells, isOpen, getLayerTitle, onClose, onTodoSelect,
                         <li key={todo.id} className={checked ? 'is-checked' : undefined}>
                           <button
                             type="button"
+                            style={{ paddingLeft: 8 + todo.depth * 18 }}
                             onClick={() => {
                               const nextChecked = !checked
 

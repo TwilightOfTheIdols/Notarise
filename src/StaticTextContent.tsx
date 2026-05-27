@@ -1,3 +1,4 @@
+import { memo } from 'react'
 import type { CSSProperties, ReactNode } from 'react'
 import type { JSONContent } from '@tiptap/react'
 
@@ -73,6 +74,12 @@ const renderNode = (node: JSONContent, key: number | string): ReactNode => {
 
   if (node.type === 'image') {
     const src = typeof node.attrs?.src === 'string' ? node.attrs.src : undefined
+    const width = Number(node.attrs?.width)
+    const height = Number(node.attrs?.height)
+    const imageStyle = {
+      width: Number.isFinite(width) && width > 0 ? `${width}px` : undefined,
+      height: Number.isFinite(height) && height > 0 ? `${height}px` : undefined,
+    } satisfies CSSProperties
 
     if (!src) {
       return null
@@ -84,6 +91,7 @@ const renderNode = (node: JSONContent, key: number | string): ReactNode => {
         src={src}
         alt={typeof node.attrs?.alt === 'string' ? node.attrs.alt : ''}
         title={typeof node.attrs?.title === 'string' ? node.attrs.title : undefined}
+        style={imageStyle}
       />
     )
   }
@@ -153,10 +161,10 @@ const renderNode = (node: JSONContent, key: number | string): ReactNode => {
   return <span key={key}>{renderChildren(node)}</span>
 }
 
-export function StaticTextContent({ content }: StaticTextContentProps) {
+export const StaticTextContent = memo(function StaticTextContent({ content }: StaticTextContentProps) {
   return (
     <div className="text-editor static-text-editor" aria-hidden="true">
       {renderChildren(content)}
     </div>
   )
-}
+})

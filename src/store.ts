@@ -183,6 +183,16 @@ const collectImageCount = (value: unknown): number => {
   return selfCount + children.reduce((count, child) => count + collectImageCount(child), 0)
 }
 
+const getTaskItemLabelText = (node: Record<string, unknown>) => {
+  if (!Array.isArray(node.content)) {
+    return ''
+  }
+
+  const firstParagraph = node.content.find((child) => isRecord(child) && child.type === 'paragraph')
+
+  return firstParagraph ? getContentText(firstParagraph) : ''
+}
+
 type TodoIndexEntry = {
   cellId: string
   layer: number
@@ -206,7 +216,7 @@ const collectTodoIndexEntries = (
       cellId: cell.id,
       layer: cell.layer,
       checked: isRecord(node.attrs) && node.attrs.checked === true,
-      text: getContentText(node) || 'Untitled todo',
+      text: getTaskItemLabelText(node) || 'Untitled todo',
       path,
     })
   }
@@ -309,6 +319,16 @@ const collectInlineMarkdown = (node: unknown): string => {
   return node.content.map(collectInlineMarkdown).join('')
 }
 
+const collectTaskItemLabelMarkdown = (node: Record<string, unknown>) => {
+  if (!Array.isArray(node.content)) {
+    return ''
+  }
+
+  const firstParagraph = node.content.find((child) => isRecord(child) && child.type === 'paragraph')
+
+  return firstParagraph ? collectInlineMarkdown(firstParagraph) : ''
+}
+
 const contentToMarkdownBlocks = (node: unknown, depth = 0): string[] => {
   if (!isRecord(node)) {
     return []
@@ -332,9 +352,19 @@ const contentToMarkdownBlocks = (node: unknown, depth = 0): string[] => {
   }
 
   if (node.type === 'taskList' && Array.isArray(node.content)) {
-    return node.content.map((child) => {
+    return node.content.flatMap((child) => {
       const checked = isRecord(child) && isRecord(child.attrs) && child.attrs.checked === true
-      return `${'  '.repeat(depth)}- [${checked ? 'x' : ' '}] ${collectInlineMarkdown(child)}`
+      const label = isRecord(child) ? collectTaskItemLabelMarkdown(child) : ''
+      const nestedBlocks = isRecord(child) && Array.isArray(child.content)
+        ? child.content
+            .filter((nestedChild) => isRecord(nestedChild) && nestedChild.type === 'taskList')
+            .flatMap((nestedChild) => contentToMarkdownBlocks(nestedChild, depth + 1))
+        : []
+
+      return [
+        `${'  '.repeat(depth)}- [${checked ? 'x' : ' '}] ${label}`,
+        ...nestedBlocks,
+      ]
     })
   }
 

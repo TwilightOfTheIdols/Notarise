@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { PointerEvent as ReactPointerEvent } from 'react'
+import type { CSSProperties, PointerEvent as ReactPointerEvent } from 'react'
 import type { Editor } from '@tiptap/react'
 import { ListTodo, Package, PackageOpen, ScrollText, Settings, Trash2 } from 'lucide-react'
 import {
@@ -32,7 +32,7 @@ import { CanvasCellDragPreview, DeletedTextPanel, StorageDragPreview } from './S
 import { TextSizeWheelPicker } from './TextSizeWheel'
 import { GlobalSearch } from './GlobalSearch'
 import { SettingsPanel } from './SettingsPanel'
-import { CanvasTextBox } from './CanvasTextBox'
+import { CanvasLayer } from './CanvasLayer'
 import { ConfirmationDialog } from './ConfirmationDialog'
 import type { ConfirmationRequest } from './ConfirmationDialog'
 import { LayerRail } from './LayerRail'
@@ -130,6 +130,12 @@ type TextSizeDialState = {
   height: number
   rotation: number
   isExiting?: boolean
+}
+
+type VisibleLayerGroup = {
+  layer: number
+  displayLayer: number
+  boxes: CellModel[]
 }
 
 const SEARCH_ANIMATION_DURATIONS: Record<SearchAnimationPreset, { min: number; max: number }> = {
@@ -258,6 +264,13 @@ const getOrderedLayerMap = (orderedLayers: number[]) => {
   return new Map(uniqueLayers.map((layer, index) => [layer, topLayer - index]))
 }
 
+function useStableEvent<T extends (...args: any[]) => unknown>(handler: T): T {
+  const handlerRef = useRef(handler)
+  handlerRef.current = handler
+
+  return useCallback(((...args: Parameters<T>) => handlerRef.current(...args)) as T, [])
+}
+
 const snapToDevicePixel = (value: number) => {
   const ratio = window.devicePixelRatio || 1
   return Math.round(value * ratio) / ratio
@@ -360,6 +373,7 @@ export function App() {
   const fontSizeLabelFrameRef = useRef<number | null>(null)
   const layerReleaseFrameRef = useRef<number | null>(null)
   const compassAngleRef = useRef(0)
+  const visibleLayerGroupsRef = useRef<VisibleLayerGroup[]>([])
   const [isPanning, setIsPanning] = useState(false)
   const [isCanvasMoving, setIsCanvasMoving] = useState(false)
   const [isSearchJumping, setIsSearchJumping] = useState(false)
@@ -1904,6 +1918,58 @@ export function App() {
     workspaceSize.height,
     workspaceSize.width,
   ])
+  const visibleLayerGroups = useMemo(() => {
+    const groups = new Map<number, VisibleLayerGroup>()
+
+    visibleBoxes.forEach((box) => {
+      const displayLayer = layerPreviewMap?.get(box.layer) ?? box.layer
+      const group = groups.get(box.layer)
+
+      if (group) {
+        group.boxes.push(box)
+        return
+      }
+
+      groups.set(box.layer, {
+        layer: box.layer,
+        displayLayer,
+        boxes: [box],
+      })
+    })
+
+    const previousGroups = visibleLayerGroupsRef.current
+    const previousByLayer = new Map(previousGroups.map((group) => [group.layer, group]))
+    const nextGroups = [...groups.values()]
+      .sort((a, b) => a.displayLayer - b.displayLayer)
+      .map((group) => {
+        const previousGroup = previousByLayer.get(group.layer)
+        const hasSameBoxes = previousGroup?.boxes.length === group.boxes.length &&
+          previousGroup.boxes.every((box, index) => box === group.boxes[index])
+
+        return previousGroup && previousGroup.displayLayer === group.displayLayer && hasSameBoxes
+          ? previousGroup
+          : group
+      })
+
+    visibleLayerGroupsRef.current = nextGroups
+
+    return nextGroups
+  }, [layerPreviewMap, visibleBoxes])
+  const controlScale = (1 + viewport.zoom) / (2 * viewport.zoom)
+  const surfaceStyle = {
+    transform: `translate(${surfaceX}px, ${surfaceY}px) scale(${viewport.zoom})`,
+    '--cell-border-width': `${1 / viewport.zoom}px`,
+    '--control-scale': controlScale,
+    '--drag-dot-radius': `${1.25 / viewport.zoom}px`,
+  } as CSSProperties
+  const stableSelectBox = useStableEvent(selectBoxWithEmptyCleanup)
+  const stableStartBoxDrag = useStableEvent(startBoxDrag)
+  const stableDeleteCell = useStableEvent(deleteCellWithConfirmation)
+  const stableStartResize = useStableEvent(startResize)
+  const stableStartScale = useStableEvent(startScale)
+  const stableStartCanvasPan = useStableEvent(startCanvasPanFromPointer)
+  const stableRegisterEditor = useStableEvent(registerEditor)
+  const stableUnregisterEditor = useStableEvent(unregisterEditor)
   const rawCompassAngle = Math.atan2(
     viewport.x - workspaceSize.width / 2,
     -(viewport.y - workspaceSize.height / 2),
@@ -2040,22 +2106,22 @@ export function App() {
           />
           <div
             className="surface-grid"
-            style={{
-              transform: `translate(${surfaceX}px, ${surfaceY}px) scale(${viewport.zoom})`,
-            }}
+            style={surfaceStyle}
           >
             <div className="page-guide" aria-hidden="true" />
-            {visibleBoxes.map((box) => (
-              <CanvasTextBox
-                key={box.id}
-                box={box}
-                isSelected={selectedBoxId === box.id}
+            {visibleLayerGroups.map((group) => (
+              <CanvasLayer
+                key={group.layer}
+                boxes={group.boxes}
+                layer={group.layer}
+                displayLayer={group.displayLayer}
                 activeLayer={activeLayer}
                 frontLayer={frontLayer}
-                displayLayer={layerPreviewMap?.get(box.layer) ?? box.layer}
                 visualLayer={visualLayerRenderPosition}
                 theme={theme}
-                viewportZoom={viewport.zoom}
+                selectedBoxId={selectedBoxId}
+                draggedBoxId={draggedBoxId}
+                scalingBoxId={textSizeDial?.boxId ?? null}
                 viewportCenterWorldX={viewportCenterWorldX}
                 viewportCenterWorldY={viewportCenterWorldY}
                 layerPanDepth={settings.layerPanDepth}
@@ -2063,16 +2129,14 @@ export function App() {
                 backgroundLayerBlur={settings.backgroundLayerBlur}
                 searchFocusLayer={searchFocusLayer}
                 searchBrightnessPulse={searchBrightnessPulse}
-                isDragging={draggedBoxId === box.id}
-                onSelect={selectBoxWithEmptyCleanup}
-                onStartDrag={startBoxDrag}
-                onDelete={deleteCellWithConfirmation}
-                onStartResize={startResize}
-                onStartScale={startScale}
-                onStartPan={startCanvasPanFromPointer}
-                isScalingText={textSizeDial?.boxId === box.id}
-                onEditorReady={registerEditor}
-                onEditorDestroy={unregisterEditor}
+                onSelect={stableSelectBox}
+                onStartDrag={stableStartBoxDrag}
+                onDelete={stableDeleteCell}
+                onStartResize={stableStartResize}
+                onStartScale={stableStartScale}
+                onStartPan={stableStartCanvasPan}
+                onEditorReady={stableRegisterEditor}
+                onEditorDestroy={stableUnregisterEditor}
               />
             ))}
           </div>
