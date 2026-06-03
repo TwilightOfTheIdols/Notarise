@@ -1,5 +1,8 @@
-import type { CSSProperties, PointerEvent as ReactPointerEvent } from 'react'
+import { useCallback, useEffect, useRef } from 'react'
+import type { CSSProperties, PointerEvent as ReactPointerEvent, WheelEvent as ReactWheelEvent } from 'react'
 import { Circle, Plus } from 'lucide-react'
+
+const EDGE_FADE_PX = 72
 
 export type LayerDragState = {
   layer: number
@@ -21,6 +24,7 @@ export type LayerReleaseState = {
 type LayerRailProps = {
   layers: number[]
   activeLayer: number
+  scrollTarget: { layer: number; requestId: number } | null
   dragState: LayerDragState | null
   releaseState: LayerReleaseState | null
   topCreateLayer: number
@@ -35,6 +39,7 @@ type LayerRailProps = {
 export function LayerRail({
   layers,
   activeLayer,
+  scrollTarget,
   dragState,
   releaseState,
   topCreateLayer,
@@ -45,6 +50,122 @@ export function LayerRail({
   onPointerMove,
   onPointerUp,
 }: LayerRailProps) {
+  const scrollRef = useRef<HTMLDivElement>(null)
+  const layerButtonRefs = useRef(new Map<number, HTMLButtonElement>())
+  const handledScrollRequestRef = useRef<number | null>(null)
+  const scrollStateFrameRef = useRef<number | null>(null)
+
+  const updateRailScrollState = useCallback(() => {
+    const scrollElement = scrollRef.current
+
+    if (!scrollElement) {
+      return
+    }
+
+    const maxScrollTop = scrollElement.scrollHeight - scrollElement.clientHeight
+    const nextScrollEdges = {
+      isAtTop: scrollElement.scrollTop <= 1,
+      isAtBottom: maxScrollTop <= 1 || scrollElement.scrollTop >= maxScrollTop - 1,
+    }
+    const scrollRect = scrollElement.getBoundingClientRect()
+    const topFade = nextScrollEdges.isAtTop ? 0 : EDGE_FADE_PX
+    const bottomFade = nextScrollEdges.isAtBottom ? 0 : EDGE_FADE_PX
+
+    layers.forEach((layer) => {
+      const layerButton = layerButtonRefs.current.get(layer)
+
+      if (!layerButton) {
+        return
+      }
+
+      const layerRect = layerButton.getBoundingClientRect()
+
+      if (dragState?.isDragging && dragState.layer === layer) {
+        layerButton.style.opacity = ''
+        return
+      }
+
+      const layerCenter = (layerRect.top + layerRect.bottom) / 2 - scrollRect.top
+      let opacity = 1
+
+      if (topFade > 0 && layerCenter < topFade) {
+        opacity = Math.min(opacity, Math.max(0, layerCenter / topFade))
+      }
+
+      if (bottomFade > 0 && layerCenter > scrollRect.height - bottomFade) {
+        opacity = Math.min(opacity, Math.max(0, (scrollRect.height - layerCenter) / bottomFade))
+      }
+
+      const nextOpacity = Math.round(opacity * 1000) / 1000
+      layerButton.style.opacity = nextOpacity < 0.999 ? String(nextOpacity) : ''
+    })
+  }, [dragState?.isDragging, dragState?.layer, layers])
+
+  const scheduleRailScrollStateUpdate = useCallback(() => {
+    if (scrollStateFrameRef.current !== null) {
+      return
+    }
+
+    scrollStateFrameRef.current = window.requestAnimationFrame(() => {
+      scrollStateFrameRef.current = null
+      updateRailScrollState()
+    })
+  }, [updateRailScrollState])
+
+  useEffect(() => {
+    if (dragState?.isDragging || !scrollTarget) {
+      return
+    }
+
+    if (handledScrollRequestRef.current === scrollTarget.requestId) {
+      return
+    }
+
+    const target = layerButtonRefs.current.get(scrollTarget.layer)
+
+    if (!target) {
+      return
+    }
+
+    handledScrollRequestRef.current = scrollTarget.requestId
+    target.scrollIntoView({
+      block: 'center',
+      behavior: 'smooth',
+    })
+    scheduleRailScrollStateUpdate()
+  }, [dragState?.isDragging, scrollTarget, scheduleRailScrollStateUpdate])
+
+  useEffect(() => {
+    scheduleRailScrollStateUpdate()
+  }, [layers, scheduleRailScrollStateUpdate])
+
+  useEffect(() => {
+    return () => {
+      if (scrollStateFrameRef.current !== null) {
+        window.cancelAnimationFrame(scrollStateFrameRef.current)
+      }
+    }
+  }, [])
+
+  const handleWheel = (event: ReactWheelEvent<HTMLElement>) => {
+    event.preventDefault()
+    event.stopPropagation()
+
+    const scrollElement = scrollRef.current
+
+    if (!scrollElement) {
+      return
+    }
+
+    const rawWheelDelta = Math.abs(event.deltaY) >= Math.abs(event.deltaX) ? event.deltaY : event.deltaX
+    const deltaScale = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? scrollElement.clientHeight : 1
+
+    scrollElement.scrollBy({
+      top: rawWheelDelta * deltaScale,
+      behavior: 'smooth',
+    })
+  }
+
   const createLayerButton = (layer: number, position: 'top' | 'bottom') => {
     if (layers.includes(layer)) {
       return null
@@ -54,8 +175,8 @@ export function LayerRail({
 
     return (
       <button
-        key={`create-${position}-${layer}`}
-        className="layer-dot layer-create-dot"
+        key={`create-${position}`}
+        className={`layer-dot layer-create-dot is-${position}`}
         type="button"
         title={`Create ${title}`}
         aria-label={`Create ${title}`}
@@ -75,62 +196,79 @@ export function LayerRail({
     <nav
       className={`layer-rail ${releaseState?.phase === 'hold' ? 'is-layer-committing' : ''}`}
       aria-label="Layers"
+      onWheel={handleWheel}
     >
-      {createLayerButton(topCreateLayer, 'top')}
-      {layers.map((layer) => {
-        const isDraggingLayer = dragState?.isDragging && dragState.layer === layer
-        const isReleasingLayer = releaseState?.layer === layer
-        const sourceIndex = dragState?.sourceOrder.indexOf(layer) ?? -1
-        const rowStep = dragState ? Math.max(1, dragState.rowHeight + 6) : 0
-        let layerOffset = 0
+      <div ref={scrollRef} className="layer-rail-scroll" onScroll={scheduleRailScrollStateUpdate}>
+        <div className="layer-rail-list">
+          {createLayerButton(topCreateLayer, 'top')}
+          {layers.map((layer) => {
+            const isDraggingLayer = dragState?.isDragging && dragState.layer === layer
+            const isReleasingLayer = releaseState?.layer === layer
+            const sourceIndex = dragState?.sourceOrder.indexOf(layer) ?? -1
+            const rowStep = dragState ? Math.max(1, dragState.rowHeight + 6) : 0
+            let layerOffset = 0
 
-        if (dragState?.isDragging) {
-          if (isDraggingLayer) {
-            layerOffset = dragState.currentY - dragState.startY
-          } else if (
-            dragState.targetIndex > dragState.sourceIndex &&
-            sourceIndex > dragState.sourceIndex &&
-            sourceIndex <= dragState.targetIndex
-          ) {
-            layerOffset = -rowStep
-          } else if (
-            dragState.targetIndex < dragState.sourceIndex &&
-            sourceIndex >= dragState.targetIndex &&
-            sourceIndex < dragState.sourceIndex
-          ) {
-            layerOffset = rowStep
-          }
-        }
+            if (dragState?.isDragging) {
+              if (isDraggingLayer) {
+                layerOffset = dragState.currentY - dragState.startY
+              } else if (
+                dragState.targetIndex > dragState.sourceIndex &&
+                sourceIndex > dragState.sourceIndex &&
+                sourceIndex <= dragState.targetIndex
+              ) {
+                layerOffset = -rowStep
+              } else if (
+                dragState.targetIndex < dragState.sourceIndex &&
+                sourceIndex >= dragState.targetIndex &&
+                sourceIndex < dragState.sourceIndex
+              ) {
+                layerOffset = rowStep
+              }
+            }
 
-        const layerStyle = dragState?.isDragging && (isDraggingLayer || layerOffset !== 0)
-          ? { transform: `translate(${isDraggingLayer ? 18 : 0}px, ${layerOffset}px)` } as CSSProperties
-          : isReleasingLayer ? { transform: 'translateX(18px)' } : undefined
-        const title = getLayerTitle(layer)
+            const layerTransform = dragState?.isDragging && (isDraggingLayer || layerOffset !== 0)
+              ? `translate(${isDraggingLayer ? 18 : 0}px, ${layerOffset}px)`
+              : isReleasingLayer ? 'translateX(18px)' : null
+            const layerStyle = {
+              ...(layerTransform ? { transform: layerTransform } : {}),
+            } as CSSProperties
+            const title = getLayerTitle(layer)
 
-        return (
-          <button
-            key={layer}
-            className={[
-              'layer-dot',
-              layer === activeLayer ? 'is-active' : '',
-              isDraggingLayer ? 'is-dragging' : '',
-              isReleasingLayer ? 'is-releasing' : '',
-            ].filter(Boolean).join(' ')}
-            type="button"
-            title={title}
-            aria-label={`Go to ${title}`}
-            style={layerStyle}
-            onPointerDown={(event) => onPointerDown(event, layer)}
-            onPointerMove={onPointerMove}
-            onPointerUp={onPointerUp}
-            onPointerCancel={onPointerUp}
-          >
-            <Circle size={13} strokeWidth={layer === activeLayer ? 4 : 2} />
-            <span>{title}</span>
-          </button>
-        )
-      })}
-      {createLayerButton(bottomCreateLayer, 'bottom')}
+            return (
+              <button
+                key={layer}
+                ref={(node) => {
+                  if (node) {
+                    layerButtonRefs.current.set(layer, node)
+                    return
+                  }
+
+                  layerButtonRefs.current.delete(layer)
+                }}
+                className={[
+                  'layer-dot',
+                  layer === activeLayer ? 'is-active' : '',
+                  isDraggingLayer ? 'is-dragging' : '',
+                  isReleasingLayer ? 'is-releasing' : '',
+                ].filter(Boolean).join(' ')}
+                type="button"
+                title={title}
+                aria-label={`Go to ${title}`}
+                data-layer={layer}
+                style={layerStyle}
+                onPointerDown={(event) => onPointerDown(event, layer)}
+                onPointerMove={onPointerMove}
+                onPointerUp={onPointerUp}
+                onPointerCancel={onPointerUp}
+              >
+                <Circle size={13} strokeWidth={layer === activeLayer ? 4 : 2} />
+                <span>{title}</span>
+              </button>
+            )
+          })}
+          {createLayerButton(bottomCreateLayer, 'bottom')}
+        </div>
+      </div>
     </nav>
   )
 }

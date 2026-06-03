@@ -373,6 +373,7 @@ export function App() {
   const fontSizeLabelFrameRef = useRef<number | null>(null)
   const layerReleaseFrameRef = useRef<number | null>(null)
   const compassAngleRef = useRef(0)
+  const visualLayerRef = useRef<number | null>(null)
   const visibleLayerGroupsRef = useRef<VisibleLayerGroup[]>([])
   const [isPanning, setIsPanning] = useState(false)
   const [isCanvasMoving, setIsCanvasMoving] = useState(false)
@@ -396,8 +397,14 @@ export function App() {
   const [fontSizeRowLabels, setFontSizeRowLabels] = useState<FontSizeRowLabel[]>([])
   const [searchBrightnessPulse, setSearchBrightnessPulse] = useState(0)
   const [searchFocusLayer, setSearchFocusLayer] = useState<number | null>(null)
+  const [layerRailScrollTarget, setLayerRailScrollTarget] = useState<{ layer: number; requestId: number } | null>(null)
 
   useDocumentPersistence()
+
+  const setVisualLayerValue = useCallback((layer: number | null) => {
+    visualLayerRef.current = layer
+    setVisualLayer(layer)
+  }, [])
 
   useEffect(() => {
     const root = document.documentElement
@@ -563,6 +570,18 @@ export function App() {
     return nextOrder
   }
 
+  const requestLayerRailScroll = (layer: number) => {
+    setLayerRailScrollTarget((target) => ({
+      layer,
+      requestId: (target?.requestId ?? 0) + 1,
+    }))
+  }
+
+  const createLayerFromRail = (layer: number) => {
+    requestLayerRailScroll(layer)
+    jumpToLayer(layer)
+  }
+
   const layerPreviewMap = layerDrag?.isDragging
     ? getOrderedLayerMap(getLayerDragOrder(layerDrag))
     : null
@@ -626,8 +645,7 @@ export function App() {
     setLayerDrag(null)
 
     if (shouldSelectLayer) {
-      setVisualLayer(null)
-      setLayer(layerDrag.layer)
+      jumpToLayer(layerDrag.layer)
       return
     }
 
@@ -635,7 +653,7 @@ export function App() {
       const reorderedLayer = getOrderedLayerMap(visualOrder).get(layerDrag.layer) ?? layerDrag.layer
       setLayerRelease({ layer: reorderedLayer, phase: 'hold' })
       reorderLayers(visualOrder)
-      setVisualLayer(null)
+      setVisualLayerValue(null)
       layerReleaseFrameRef.current = window.requestAnimationFrame(() => {
         setLayerRelease({ layer: reorderedLayer, phase: 'settle' })
         layerReleaseFrameRef.current = window.requestAnimationFrame(() => {
@@ -1141,7 +1159,7 @@ export function App() {
       window.cancelAnimationFrame(searchJumpAnimationRef.current)
       searchJumpAnimationRef.current = null
     }
-    setVisualLayer(null)
+    setVisualLayerValue(null)
     resetSearchBrightness()
     setIsSearchJumping(false)
 
@@ -1199,19 +1217,20 @@ export function App() {
       y: height / 2 - (cell.y + cell.height / 2) * zoom,
       zoom,
     }
-    const startLayer = activeLayer
+    const startLayer = visualLayerRef.current ?? visualLayer ?? activeLayer
     const layerDistance = Math.abs(cell.layer - startLayer)
     const duration = getSearchJumpDuration(startViewport, targetViewport, layerDistance, settings)
     const startTime = performance.now()
 
     selectBoxWithEmptyCleanup(cell.id)
+    requestLayerRailScroll(cell.layer)
 
     if (duration === 0) {
-      setVisualLayer(cell.layer)
+      setVisualLayerValue(cell.layer)
       resetSearchBrightness()
       setLayerAndSelect(cell.layer, cell.id)
       setViewport(targetViewport)
-      window.requestAnimationFrame(() => setVisualLayer(null))
+      window.requestAnimationFrame(() => setVisualLayerValue(null))
       settleCanvasMovement(120)
 
       window.setTimeout(() => {
@@ -1220,7 +1239,7 @@ export function App() {
       return
     }
 
-    setVisualLayer(startLayer)
+    setVisualLayerValue(startLayer)
     stopSearchBrightnessRelease()
     setSearchBrightnessPulse(0)
     setSearchFocusLayer(layerDistance > 0 ? cell.layer : null)
@@ -1238,7 +1257,7 @@ export function App() {
         y: startViewport.y + (targetViewport.y - startViewport.y) * eased,
         zoom,
       })
-      setVisualLayer(nextLayer)
+      setVisualLayerValue(nextLayer)
       setSearchBrightnessPulse(brightnessPulse)
 
       if (progress < 1) {
@@ -1247,13 +1266,13 @@ export function App() {
       }
 
       searchJumpAnimationRef.current = null
-      setVisualLayer(cell.layer)
+      setVisualLayerValue(cell.layer)
       setSearchBrightnessPulse(layerDistance > 0 ? 1 : 0)
       setSearchFocusLayer(layerDistance > 0 ? cell.layer : null)
       setLayerAndSelect(cell.layer, cell.id)
       setViewport(targetViewport)
       window.requestAnimationFrame(() => {
-        setVisualLayer(null)
+        setVisualLayerValue(null)
         window.requestAnimationFrame(() => {
           setIsSearchJumping(false)
         })
@@ -1269,7 +1288,7 @@ export function App() {
     searchJumpAnimationRef.current = window.requestAnimationFrame(animate)
   }
 
-  const jumpToLayer = (layer: number) => {
+  const jumpToLayer = (layer: number, options: { scrollRail?: boolean } = {}) => {
     if (originAnimationRef.current !== null) {
       window.cancelAnimationFrame(originAnimationRef.current)
       originAnimationRef.current = null
@@ -1282,9 +1301,60 @@ export function App() {
     deselectCurrentBox()
     setIsSearchJumping(false)
     resetSearchBrightness()
-    setVisualLayer(null)
-    setLayer(layer)
-    settleCanvasMovement(120)
+    if (options.scrollRail) {
+      requestLayerRailScroll(layer)
+    }
+
+    const startLayer = visualLayerRef.current ?? visualLayer ?? activeLayer
+    const layerDistance = Math.abs(layer - startLayer)
+    const duration = getSearchJumpDuration(viewport, viewport, layerDistance, settings)
+
+    if (layerDistance === 0 || duration === 0) {
+      setVisualLayerValue(layer)
+      resetSearchBrightness()
+      setLayer(layer)
+      window.requestAnimationFrame(() => setVisualLayerValue(null))
+      settleCanvasMovement(120)
+      return
+    }
+
+    const startTime = performance.now()
+
+    setVisualLayerValue(startLayer)
+    stopSearchBrightnessRelease()
+    setSearchBrightnessPulse(0)
+    setSearchFocusLayer(layer)
+    setIsSearchJumping(true)
+    setIsCanvasMoving(true)
+
+    const animate = (time: number) => {
+      const progress = Math.min(1, (time - startTime) / duration)
+      const eased = 1 - Math.pow(1 - progress, 3)
+
+      setVisualLayerValue(startLayer + (layer - startLayer) * eased)
+      setSearchBrightnessPulse(eased)
+
+      if (progress < 1) {
+        searchJumpAnimationRef.current = window.requestAnimationFrame(animate)
+        return
+      }
+
+      searchJumpAnimationRef.current = null
+      setVisualLayerValue(layer)
+      setSearchBrightnessPulse(1)
+      setSearchFocusLayer(layer)
+      setLayer(layer)
+      window.requestAnimationFrame(() => {
+        setVisualLayerValue(null)
+        window.requestAnimationFrame(() => {
+          setIsSearchJumping(false)
+        })
+      })
+      releaseSearchBrightness(SEARCH_SETTLE_MS, 1)
+      settleCanvasMovement(SEARCH_SETTLE_MS)
+    }
+
+    searchJumpAnimationRef.current = window.requestAnimationFrame(animate)
   }
 
   useEffect(() => {
@@ -1595,6 +1665,12 @@ export function App() {
   }
 
   const handleWheel = (event: WheelEvent) => {
+    const target = event.target instanceof Element ? event.target : null
+
+    if (target?.closest('.layer-rail')) {
+      return
+    }
+
     event.preventDefault()
     event.stopPropagation()
     setIsCanvasMoving(true)
@@ -1745,7 +1821,7 @@ export function App() {
           title: layerTitle,
           boxes: layerBoxes,
         })
-        setVisualLayer(null)
+        setVisualLayerValue(null)
         removeLayer(activeLayer)
       },
     })
@@ -1785,7 +1861,7 @@ export function App() {
         setTextSizeDial(null)
         setFontSizeRowLabels([])
         setStorageDragPreview(null)
-        setVisualLayer(null)
+        setVisualLayerValue(null)
         hydrateDocument(withUpdatedAt(document))
       },
     })
@@ -2073,14 +2149,14 @@ export function App() {
         <LayerRail
           layers={visibleLayerDots}
           activeLayer={visibleActiveLayer}
+          scrollTarget={layerRailScrollTarget}
           dragState={layerDrag}
           releaseState={layerRelease}
           topCreateLayer={layerBounds.top + 1}
           bottomCreateLayer={layerBounds.bottom - 1}
           getLayerTitle={getLayerTitle}
           onCreateLayer={(layer) => {
-            setVisualLayer(null)
-            setLayer(layer)
+            createLayerFromRail(layer)
           }}
           onPointerDown={startLayerDrag}
           onPointerMove={moveLayerDrag}
@@ -2148,7 +2224,7 @@ export function App() {
         getLayerTitle={getLayerTitle}
         onActivate={deselectCurrentBox}
         onResultSelect={jumpToCell}
-        onLayerSelect={jumpToLayer}
+        onLayerSelect={(layer) => jumpToLayer(layer, { scrollRail: true })}
       />
 
       <SettingsPanel
