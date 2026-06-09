@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef } from 'react'
-import type { CSSProperties, PointerEvent as ReactPointerEvent, WheelEvent as ReactWheelEvent } from 'react'
+import type { CSSProperties, PointerEvent as ReactPointerEvent } from 'react'
 import { Circle, Plus } from 'lucide-react'
 
 const EDGE_FADE_PX = 72
@@ -31,6 +31,7 @@ type LayerRailProps = {
   bottomCreateLayer: number
   getLayerTitle: (layer: number) => string
   onCreateLayer: (layer: number) => void
+  onSelectLayer: (layer: number) => void
   onPointerDown: (event: ReactPointerEvent<HTMLButtonElement>, layer: number) => void
   onPointerMove: (event: ReactPointerEvent<HTMLButtonElement>) => void
   onPointerUp: (event: ReactPointerEvent<HTMLButtonElement>) => void
@@ -46,10 +47,12 @@ export function LayerRail({
   bottomCreateLayer,
   getLayerTitle,
   onCreateLayer,
+  onSelectLayer,
   onPointerDown,
   onPointerMove,
   onPointerUp,
 }: LayerRailProps) {
+  const navRef = useRef<HTMLElement>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const layerButtonRefs = useRef(new Map<number, HTMLButtonElement>())
   const handledScrollRequestRef = useRef<number | null>(null)
@@ -140,6 +143,23 @@ export function LayerRail({
   }, [layers, scheduleRailScrollStateUpdate])
 
   useEffect(() => {
+    const scrollElement = scrollRef.current
+
+    if (!scrollElement || typeof ResizeObserver === 'undefined') {
+      return
+    }
+
+    const observer = new ResizeObserver(() => {
+      scheduleRailScrollStateUpdate()
+    })
+    observer.observe(scrollElement)
+
+    return () => {
+      observer.disconnect()
+    }
+  }, [scheduleRailScrollStateUpdate])
+
+  useEffect(() => {
     return () => {
       if (scrollStateFrameRef.current !== null) {
         window.cancelAnimationFrame(scrollStateFrameRef.current)
@@ -147,24 +167,38 @@ export function LayerRail({
     }
   }, [])
 
-  const handleWheel = (event: ReactWheelEvent<HTMLElement>) => {
-    event.preventDefault()
-    event.stopPropagation()
+  useEffect(() => {
+    const nav = navRef.current
 
-    const scrollElement = scrollRef.current
-
-    if (!scrollElement) {
+    if (!nav) {
       return
     }
 
-    const rawWheelDelta = Math.abs(event.deltaY) >= Math.abs(event.deltaX) ? event.deltaY : event.deltaX
-    const deltaScale = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? scrollElement.clientHeight : 1
+    const handleWheel = (event: WheelEvent) => {
+      const scrollElement = scrollRef.current
 
-    scrollElement.scrollBy({
-      top: rawWheelDelta * deltaScale,
-      behavior: 'smooth',
-    })
-  }
+      if (!scrollElement) {
+        return
+      }
+
+      event.preventDefault()
+      event.stopPropagation()
+
+      const rawWheelDelta = Math.abs(event.deltaY) >= Math.abs(event.deltaX) ? event.deltaY : event.deltaX
+      const deltaScale = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? scrollElement.clientHeight : 1
+
+      scrollElement.scrollBy({
+        top: rawWheelDelta * deltaScale,
+        behavior: 'smooth',
+      })
+    }
+
+    nav.addEventListener('wheel', handleWheel, { passive: false })
+
+    return () => {
+      nav.removeEventListener('wheel', handleWheel)
+    }
+  }, [])
 
   const createLayerButton = (layer: number, position: 'top' | 'bottom') => {
     if (layers.includes(layer)) {
@@ -180,11 +214,7 @@ export function LayerRail({
         type="button"
         title={`Create ${title}`}
         aria-label={`Create ${title}`}
-        onPointerDown={(event) => {
-          event.preventDefault()
-          event.stopPropagation()
-          onCreateLayer(layer)
-        }}
+        onClick={() => onCreateLayer(layer)}
       >
         <Circle size={13} strokeWidth={2} />
         <Plus size={13} strokeWidth={2.6} />
@@ -194,13 +224,13 @@ export function LayerRail({
 
   return (
     <nav
+      ref={navRef}
       className={`layer-rail ${releaseState?.phase === 'hold' ? 'is-layer-committing' : ''}`}
       aria-label="Layers"
-      onWheel={handleWheel}
     >
+      {createLayerButton(topCreateLayer, 'top')}
       <div ref={scrollRef} className="layer-rail-scroll" onScroll={scheduleRailScrollStateUpdate}>
         <div className="layer-rail-list">
-          {createLayerButton(topCreateLayer, 'top')}
           {layers.map((layer) => {
             const isDraggingLayer = dragState?.isDragging && dragState.layer === layer
             const isReleasingLayer = releaseState?.layer === layer
@@ -256,6 +286,15 @@ export function LayerRail({
                 aria-label={`Go to ${title}`}
                 data-layer={layer}
                 style={layerStyle}
+                onKeyDown={(event) => {
+                  if (event.repeat) {
+                    return
+                  }
+                  if (event.key === 'Enter' || event.key === ' ' || event.key === 'Spacebar') {
+                    event.preventDefault()
+                    onSelectLayer(layer)
+                  }
+                }}
                 onPointerDown={(event) => onPointerDown(event, layer)}
                 onPointerMove={onPointerMove}
                 onPointerUp={onPointerUp}
@@ -266,9 +305,9 @@ export function LayerRail({
               </button>
             )
           })}
-          {createLayerButton(bottomCreateLayer, 'bottom')}
         </div>
       </div>
+      {createLayerButton(bottomCreateLayer, 'bottom')}
     </nav>
   )
 }
