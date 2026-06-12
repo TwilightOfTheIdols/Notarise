@@ -2,7 +2,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
 import { DOT_SPACING } from './constants'
 import { Toolbar } from './components/Toolbar'
+import { Bot } from 'lucide-react'
 import { CanvasOverlayButtons } from './components/CanvasOverlayButtons'
+import { AgentPanel } from './components/AgentPanel'
+import { useAgentStore } from './useAgentStore'
 import { FontSizeRowLabels } from './components/FontSizeRowLabels'
 import { isEmptyDocumentContent } from './contentUtils'
 import { CanvasCellDragPreview, DeletedTextPanel, StorageDragPreview } from './StoragePanel'
@@ -117,6 +120,9 @@ export function App() {
   })
 
   useThemeVariables(theme, settings.colorTemperature)
+
+  const isAgentOpen = useAgentStore((state) => state.isOpen)
+  const setAgentOpen = useAgentStore((state) => state.setOpen)
 
   const requestLayerRailScroll = (layer: number) => {
     setLayerRailScrollTarget((target) => ({
@@ -553,6 +559,17 @@ export function App() {
           deleteLayerLabel={`Delete ${getLayerTitle(activeLayer)}`}
         />
 
+        <button
+          className={`agent-bucket ${isAgentOpen ? 'is-open' : ''}`}
+          type="button"
+          onClick={() => setAgentOpen(!isAgentOpen)}
+          title="Assistant"
+          aria-label="Assistant"
+          aria-pressed={isAgentOpen}
+        >
+          <Bot size={25} aria-hidden="true" />
+        </button>
+
         <LayerRail
           layers={visibleLayerDots}
           activeLayer={visibleActiveLayer}
@@ -668,6 +685,8 @@ export function App() {
         }}
         onTodoCheckChange={setTodoCheckedFromPanel}
       />
+
+      <AgentPanel />
 
       {storageDragPreview && (
         <StorageDragPreview

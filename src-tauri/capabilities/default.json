@@ -7,6 +7,38 @@
   ],
   "permissions": [
     "core:default",
-    "store:default"
+    "store:default",
+    {
+      "identifier": "shell:allow-execute",
+      "allow": [
+        { "name": "claude", "cmd": "claude", "args": true },
+        { "name": "claude.cmd", "cmd": "claude.cmd", "args": true },
+        { "name": "codex", "cmd": "codex", "args": true },
+        { "name": "codex.cmd", "cmd": "codex.cmd", "args": true },
+        { "name": "npm", "cmd": "npm", "args": true },
+        { "name": "npm.cmd", "cmd": "npm.cmd", "args": true },
+        { "name": "cmd", "cmd": "cmd", "args": true },
+        { "name": "cmd.exe", "cmd": "cmd.exe", "args": true },
+        { "name": "sh", "cmd": "sh", "args": true }
+      ]
+    },
+    {
+      "identifier": "shell:allow-spawn",
+      "allow": [
+        { "name": "claude", "cmd": "claude", "args": true },
+        { "name": "claude.cmd", "cmd": "claude.cmd", "args": true },
+        { "name": "codex", "cmd": "codex", "args": true },
+        { "name": "codex.cmd", "cmd": "codex.cmd", "args": true },
+        { "name": "npm", "cmd": "npm", "args": true },
+        { "name": "npm.cmd", "cmd": "npm.cmd", "args": true },
+        { "name": "cmd", "cmd": "cmd", "args": true },
+        { "name": "cmd.exe", "cmd": "cmd.exe", "args": true },
+        { "name": "sh", "cmd": "sh", "args": true }
+      ]
+    },
+    "shell:allow-kill",
+    "shell:allow-stdin-write",
+    "shell:allow-open",
+    "dialog:allow-open"
   ]
 }

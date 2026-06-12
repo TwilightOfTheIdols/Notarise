@@ -44,6 +44,14 @@ const renderChildren = (node: JSONContent): ReactNode => {
   return node.content?.map((child, index) => renderNode(child, index)) ?? null
 }
 
+// Empty block nodes (e.g. a blank line) have no line box and collapse to zero
+// height. The live editor keeps them visible with a trailing break, so mirror
+// that here to preserve blank lines in the static/drag render.
+const renderBlockChildren = (node: JSONContent): ReactNode => {
+  const hasContent = Array.isArray(node.content) && node.content.length > 0
+  return hasContent ? renderChildren(node) : <br />
+}
+
 const renderNode = (node: JSONContent, key: number | string): ReactNode => {
   if (node.type === 'text') {
     return <span key={key}>{renderMarks(node, node.text ?? '')}</span>
@@ -56,7 +64,7 @@ const renderNode = (node: JSONContent, key: number | string): ReactNode => {
   if (node.type === 'paragraph') {
     return (
       <p key={key} style={getNodeFontSizeStyle(node)}>
-        {renderChildren(node)}
+        {renderBlockChildren(node)}
       </p>
     )
   }
@@ -67,7 +75,7 @@ const renderNode = (node: JSONContent, key: number | string): ReactNode => {
 
     return (
       <Tag key={key} style={getNodeFontSizeStyle(node)}>
-        {renderChildren(node)}
+        {renderBlockChildren(node)}
       </Tag>
     )
   }

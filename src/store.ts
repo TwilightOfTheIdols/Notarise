@@ -1183,3 +1183,14 @@ export const screenToWorld = (
   x: (client.x - viewport.x) / viewport.zoom,
   y: (client.y - viewport.y) / viewport.zoom,
 })
+
+// Markdown <-> cell-content round-trip used to materialize cells as files for an
+// agent and rebuild them from the agent's edits (the safe-write contract). This
+// pair must be symmetric: blocks are joined with single newlines (so each line
+// maps to one block) — NOT the `\n\n` paragraph spacing of the export markdown,
+// which would re-parse into an extra empty paragraph on every round-trip. A
+// trailing newline (most editors add one) is trimmed for the same reason.
+export const cellTextFromContent = (content: JSONContent): string =>
+  contentToMarkdownBlocks(content).join('\n')
+export const contentFromCellText = (text: string): JSONContent =>
+  plainTextToContent(text.replace(/\n+$/, ''))
