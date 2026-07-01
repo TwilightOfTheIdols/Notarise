@@ -5,6 +5,8 @@ import { buildFlags, runCli } from './cliRun'
 import type { TurnState } from './cliRun'
 import { collectWorkspace, materializeWorkspace } from './agentWorkspace'
 import type { AgentCellFile } from './agentWorkspace'
+import { runNotariseAction } from './notariseActions'
+import type { ActionReq } from './notariseActions'
 
 type PermReq = { id: string; tool: string; input: unknown }
 
@@ -31,8 +33,17 @@ const summarizeInput = (tool: string, input: unknown): string => {
 const startPermissionPoller = (handlers: AgentTurnHandlers, state: TurnState): (() => void) => {
   const handled = new Set<string>()
   let stopped = false
+  const stop = () => {
+    stopped = true
+    window.clearInterval(timer)
+  }
   const tick = async () => {
-    if (stopped || state.cancelled) {
+    if (stopped) {
+      return
+    }
+    // A cancelled turn never reaches onClose, so the poller shuts itself down.
+    if (state.cancelled) {
+      stop()
       return
     }
     let pending: PermReq[] = []
@@ -63,14 +74,74 @@ const startPermissionPoller = (handlers: AgentTurnHandlers, state: TurnState): (
     }
   }
   const timer = window.setInterval(() => void tick(), 300)
-  return () => {
+  return stop
+}
+
+// While a turn runs, execute Notarise MCP tool calls against the live document
+// and write results back for the agent to read.
+const startActionPoller = (state: TurnState): (() => void) => {
+  const handled = new Set<string>()
+  let stopped = false
+  const stop = () => {
     stopped = true
     window.clearInterval(timer)
   }
+  const tick = async () => {
+    if (stopped) {
+      return
+    }
+    if (state.cancelled) {
+      stop()
+      return
+    }
+    let pending: ActionReq[] = []
+    try {
+      pending = await invoke<ActionReq[]>('agent_actions_pending')
+    } catch {
+      pending = []
+    }
+    for (const req of pending) {
+      if (handled.has(req.id)) {
+        continue
+      }
+      handled.add(req.id)
+      const outcome = runNotariseAction(req.tool, req.args)
+      void invoke('agent_actions_resolve', {
+        id: req.id,
+        ok: outcome.ok,
+        result: outcome.ok ? outcome.result : null,
+        error: outcome.ok ? null : outcome.error,
+      }).catch(() => undefined)
+    }
+  }
+  const timer = window.setInterval(() => void tick(), 200)
+  return stop
 }
 
 // Turn a tool name + input into a friendly "currently doing X" status.
 const toolActivityLabel = (name: string, input: unknown): string => {
+  if (name.startsWith('mcp__notarise__')) {
+    switch (name.slice('mcp__notarise__'.length)) {
+      case 'create_cell':
+        return 'Creating a cell'
+      case 'create_layer':
+        return 'Creating a layer'
+      case 'update_cell':
+        return 'Editing a cell'
+      case 'search':
+        return 'Searching Notarise'
+      case 'list_cells':
+        return 'Listing cells'
+      case 'list_layers':
+        return 'Listing layers'
+      case 'get_cell':
+        return 'Reading a cell'
+      case 'goto_layer':
+        return 'Navigating'
+      default:
+        return 'Working in Notarise'
+    }
+  }
   const obj = (input ?? {}) as Record<string, unknown>
   const file = obj.file_path ?? obj.path ?? obj.notebook_path
   const base = (value: unknown) =>
@@ -101,14 +172,7 @@ const toolActivityLabel = (name: string, input: unknown): string => {
 }
 
 // Claude Code's --output-format stream-json emits one JSON object per line.
-const handleClaudeLine = (line: string, handlers: AgentTurnHandlers) => {
-  let event: Record<string, unknown>
-  try {
-    event = JSON.parse(line) as Record<string, unknown>
-  } catch {
-    return
-  }
-
+const handleClaudeEvent = (event: Record<string, unknown>, handlers: AgentTurnHandlers) => {
   if (event.type === 'assistant') {
     const message = event.message as { content?: Array<Record<string, unknown>> } | undefined
     for (const block of message?.content ?? []) {
@@ -129,14 +193,7 @@ const handleClaudeLine = (line: string, handlers: AgentTurnHandlers) => {
 }
 
 // Codex --json events (shapes vary across versions, so this stays defensive).
-const handleCodexLine = (line: string, handlers: AgentTurnHandlers) => {
-  let event: Record<string, unknown>
-  try {
-    event = JSON.parse(line) as Record<string, unknown>
-  } catch {
-    return
-  }
-
+const handleCodexEvent = (event: Record<string, unknown>, handlers: AgentTurnHandlers) => {
   const item = event.item as Record<string, unknown> | undefined
   if (event.type === 'item.completed' && item) {
     const kind = (item.item_type ?? item.type) as string | undefined
@@ -172,13 +229,24 @@ type SessionRuntime = {
 }
 const runtimes = new Map<string, SessionRuntime>()
 
+// Notarise document tools available via MCP in every mode. In workspace mode
+// the cell files are the primary edit surface, so steer text edits there; in
+// repo mode there are no cell files, so update_cell is the only way to edit.
+const notariseToolsNote = (useRepo: boolean): string =>
+  ' You also have Notarise tools that act on the live document: mcp__notarise__search, list_layers, ' +
+  'list_cells, get_cell, create_cell, update_cell, create_layer, and goto_layer.' +
+  (useRepo
+    ? " Use them to read the user's Notarise cells, change them (update_cell replaces a cell's text), and navigate."
+    : ' Prefer editing the cell files for text changes; use these tools to search, add cells or layers, and navigate.')
+
 const workspacePreamble = (input: AgentTurnInput): string => {
   const selected = input.context.cell ? `cells/${input.context.cell.id}.md` : null
   return (
     'Your working directory is a copy of the user\'s Notarise document. Each cell is a file at ' +
     'cells/<id>.md — edit those files to change cells. ' +
     (selected ? `The selected cell is ${selected}. ` : '') +
-    'See AGENTS.md for the contract.'
+    'See AGENTS.md for the contract.' +
+    notariseToolsNote(false)
   )
 }
 
@@ -197,7 +265,7 @@ const repoPreamble = (input: AgentTurnInput): string => {
   const note = input.context.cell
     ? 'The user has selected a Notarise cell whose notes/TODOs are below — use them to guide your work.'
     : 'The Notarise context below describes what the user is focused on.'
-  return `Your working directory is the user's project. Make the requested changes directly in the project files. ${note}`
+  return `Your working directory is the user's project. Make the requested changes directly in the project files. ${note}${notariseToolsNote(true)}`
 }
 
 const run = async (input: AgentTurnInput, handlers: AgentTurnHandlers, state: TurnState) => {
@@ -229,18 +297,27 @@ const run = async (input: AgentTurnInput, handlers: AgentTurnHandlers, state: Tu
     runtime.workspaceFiles = workspace.files
   }
 
-  // Ask mode (Claude only for now): stand up the approval bridge and poll it.
-  const askMode = isClaude && !input.settings.autoApprove
-  let permissionConfigPath: string | undefined
-  let stopPoller: (() => void) | null = null
-  if (askMode) {
+  // Claude: stand up the MCP servers (notarise actions always; perms approval in
+  // ask mode) and poll their request files.
+  let mcpConfigPath: string | undefined
+  let stopActions: (() => void) | null = null
+  let stopPerms: (() => void) | null = null
+  if (isClaude) {
+    const ask = !input.settings.autoApprove
     try {
-      const setup = await invoke<{ config_path: string }>('agent_perms_setup')
-      permissionConfigPath = setup.config_path
-      stopPoller = startPermissionPoller(handlers, state)
+      const setup = await invoke<{ config_path: string }>('agent_mcp_setup', { ask })
+      mcpConfigPath = setup.config_path
+      stopActions = startActionPoller(state)
+      if (ask) {
+        stopPerms = startPermissionPoller(handlers, state)
+      }
     } catch {
-      // bridge setup failed; fall through running without interactive prompts
+      // setup failed; run without the tool bridge
     }
+  }
+  const stopBridges = () => {
+    stopActions?.()
+    stopPerms?.()
   }
 
   // A resume id is only valid in the cwd it was created in. If the user switched
@@ -258,11 +335,11 @@ const run = async (input: AgentTurnInput, handlers: AgentTurnHandlers, state: Tu
   const promptText = needsRecap
     ? `${preamble}\n\n${buildRecap(input.history!)}\n\n${buildPrompt(input)}`
     : `${preamble}\n\n${buildPrompt(input)}`
-  const flags = buildFlags(providerId, input.settings, isClaude ? runtime.cliSessionId : undefined, permissionConfigPath)
-  const handleLine = isClaude ? handleClaudeLine : handleCodexLine
+  const flags = buildFlags(providerId, input.settings, isClaude ? runtime.cliSessionId : undefined, mcpConfigPath)
+  const handleEvent = isClaude ? handleClaudeEvent : handleCodexEvent
 
   const finalize = async () => {
-    stopPoller?.()
+    stopBridges()
     if (!state.cancelled && workspaceFiles) {
       try {
         const changed = await collectWorkspace(cwd as string, workspaceFiles)
@@ -276,35 +353,43 @@ const run = async (input: AgentTurnInput, handlers: AgentTurnHandlers, state: Tu
     handlers.onDone()
   }
 
-  await runCli(providerId, flags, promptText, cwd, {
-    onLine: (line) => {
-      // Capture the CLI session id (present on init/result events) so the next
-      // turn in this Notarise session resumes the same conversation.
-      if (isClaude) {
+  try {
+    await runCli(providerId, flags, promptText, cwd, {
+      onLine: (line) => {
+        let event: Record<string, unknown>
         try {
-          const event = JSON.parse(line) as { session_id?: unknown }
-          if (typeof event.session_id === 'string') {
-            runtime.cliSessionId = event.session_id
-          }
+          event = JSON.parse(line) as Record<string, unknown>
         } catch {
-          // non-JSON line; ignore
+          return
         }
-      }
-      handleLine(line, handlers)
-    },
-    onError: (message) => {
-      stopPoller?.()
-      handlers.onError(message)
-    },
-    onClose: (code) => {
-      if (code !== null && code !== 0) {
-        stopPoller?.()
-        handlers.onError(`The agent exited with code ${code}. Make sure it's installed and signed in.`)
-        return
-      }
-      void finalize()
-    },
-  }, state)
+        // Capture the CLI session id (present on init/result events) so the next
+        // turn in this Notarise session resumes the same conversation.
+        if (isClaude && typeof event.session_id === 'string') {
+          runtime.cliSessionId = event.session_id
+        }
+        handleEvent(event, handlers)
+      },
+      onError: (message) => {
+        stopBridges()
+        handlers.onError(message)
+      },
+      onClose: (code, stderr) => {
+        if (code !== null && code !== 0) {
+          stopBridges()
+          const tail = stderr.trim().split('\n').slice(-4).join(' ').trim()
+          const detail = tail ? `: ${tail}` : ". Make sure it's installed and signed in."
+          handlers.onError(`The agent exited with code ${code}${detail}`)
+          return
+        }
+        void finalize()
+      },
+    }, state)
+  } catch (error) {
+    // Spawn/setup failure before the CLI ever ran — onClose will never fire, so
+    // shut the bridges down here before surfacing the error.
+    stopBridges()
+    throw error
+  }
 }
 
 export const cliProvider: AgentProvider = {

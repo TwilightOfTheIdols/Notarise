@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import type { PointerEvent as ReactPointerEvent } from 'react'
 import { Check, FileText, Plus, Send, ShieldCheck, X } from 'lucide-react'
 import { useAgentStore } from '../useAgentStore'
 import { AgentOnboarding } from './AgentOnboarding'
@@ -38,6 +39,40 @@ export function AgentPanel() {
 
   const [draft, setDraft] = useState('')
 
+  // Drag-to-resize the panel from its left edge; width persists across sessions.
+  // Clamped on load too — a width saved on a large screen shouldn't swallow a
+  // smaller window.
+  const [panelWidth, setPanelWidth] = useState<number | null>(() => {
+    const saved = Number(window.localStorage.getItem('notarise.agent.width'))
+    return saved >= 320 ? Math.min(saved, Math.max(320, window.innerWidth - 40)) : null
+  })
+
+  const startResize = (event: ReactPointerEvent) => {
+    event.preventDefault()
+    document.body.style.userSelect = 'none'
+    document.body.style.cursor = 'ew-resize'
+    const move = (e: PointerEvent) => {
+      const max = Math.min(820, window.innerWidth - 40)
+      setPanelWidth(Math.min(Math.max(window.innerWidth - e.clientX, 320), max))
+    }
+    const up = () => {
+      window.removeEventListener('pointermove', move)
+      window.removeEventListener('pointerup', up)
+      window.removeEventListener('pointercancel', up)
+      document.body.style.userSelect = ''
+      document.body.style.cursor = ''
+      setPanelWidth((w) => {
+        if (w) {
+          window.localStorage.setItem('notarise.agent.width', String(Math.round(w)))
+        }
+        return w
+      })
+    }
+    window.addEventListener('pointermove', move)
+    window.addEventListener('pointerup', up)
+    window.addEventListener('pointercancel', up)
+  }
+
   // Subscribe to the doc-store slices that feed context so the chip stays live.
   const selectedBoxId = useDocumentStore((state) => state.selectedBoxId)
   const boxes = useDocumentStore((state) => state.boxes)
@@ -74,7 +109,21 @@ export function AgentPanel() {
   }
 
   return (
-    <aside className={`agent-panel ${isOpen ? 'is-open' : ''}`} aria-hidden={!isOpen}>
+    <aside
+      className={`agent-panel ${isOpen ? 'is-open' : ''}`}
+      aria-hidden={!isOpen}
+      style={panelWidth ? { width: `${panelWidth}px` } : undefined}
+    >
+      <div
+        className="agent-resize-handle"
+        onPointerDown={startResize}
+        onDoubleClick={() => {
+          window.localStorage.removeItem('notarise.agent.width')
+          setPanelWidth(null)
+        }}
+        title="Drag to resize · double-click to reset"
+        aria-hidden="true"
+      />
       <header className="agent-panel-header">
         <div className="agent-panel-title">Assistant</div>
         {SUPPORTED && linkedProviderId && (

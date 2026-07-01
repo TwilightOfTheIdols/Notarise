@@ -2291,6 +2291,65 @@ button {
   display: flex;
   flex-direction: column;
   gap: 10px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--hairline) transparent;
+}
+
+/* Palette-matched scrollbar for the panel's scroll areas. */
+.agent-thread::-webkit-scrollbar,
+.agent-onboarding::-webkit-scrollbar {
+  width: 12px;
+}
+
+.agent-thread::-webkit-scrollbar-track,
+.agent-onboarding::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.agent-thread::-webkit-scrollbar-thumb,
+.agent-onboarding::-webkit-scrollbar-thumb {
+  background: var(--hairline);
+  border-radius: 999px;
+  border: 3px solid transparent;
+  background-clip: padding-box;
+}
+
+.agent-thread::-webkit-scrollbar-thumb:hover,
+.agent-onboarding::-webkit-scrollbar-thumb:hover {
+  background: var(--muted);
+  background-clip: padding-box;
+}
+
+.agent-onboarding {
+  scrollbar-width: thin;
+  scrollbar-color: var(--hairline) transparent;
+}
+
+.agent-resize-handle {
+  position: absolute;
+  left: -3px;
+  top: 0;
+  bottom: 0;
+  width: 9px;
+  z-index: 5;
+  cursor: ew-resize;
+  touch-action: none;
+}
+
+.agent-resize-handle::after {
+  content: '';
+  position: absolute;
+  left: 3px;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: transparent;
+  transition: background-color 140ms ease;
+}
+
+.agent-resize-handle:hover::after,
+.agent-resize-handle:active::after {
+  background: var(--active-line);
 }
 
 .agent-empty {

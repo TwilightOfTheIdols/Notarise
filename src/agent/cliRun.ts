@@ -12,17 +12,27 @@ export type TurnState = { cancelled: boolean; child: Child | null }
 
 export type CliCallbacks = {
   onLine: (line: string) => void
-  onClose: (code: number | null) => void
+  onClose: (code: number | null, stderr: string) => void
   onError: (message: string) => void
 }
 
 // Flags only — the prompt is delivered via stdin (a file redirect), because the
 // Windows .cmd shim rejects multi-line command-line args.
+// Read-only Notarise tools never need approval, so pre-allow them even in ask
+// mode (mutating ones — create_cell/create_layer — still prompt).
+const NOTARISE_READONLY_TOOLS = [
+  'mcp__notarise__search',
+  'mcp__notarise__list_cells',
+  'mcp__notarise__list_layers',
+  'mcp__notarise__get_cell',
+  'mcp__notarise__goto_layer',
+].join(',')
+
 export const buildFlags = (
   providerId: AgentProviderId,
   settings: AgentSettings,
   resumeSessionId?: string,
-  permissionConfigPath?: string,
+  mcpConfigPath?: string,
 ): string[] => {
   if (providerId === 'claude-code') {
     const flags = ['-p', '--output-format', 'stream-json', '--verbose']
@@ -33,12 +43,17 @@ export const buildFlags = (
     if (settings.model !== 'default') {
       flags.push('--model', settings.model)
     }
+    if (mcpConfigPath) {
+      // Quoted: the path may contain spaces (e.g. macOS "Application Support").
+      flags.push('--mcp-config', `"${mcpConfigPath}"`)
+      flags.push('--allowedTools', NOTARISE_READONLY_TOOLS)
+    }
     if (settings.autoApprove) {
       flags.push('--dangerously-skip-permissions')
-    } else if (permissionConfigPath) {
-      // Ask mode: route each permission through our MCP approval tool, which
-      // surfaces it in Notarise for an Allow/Deny.
-      flags.push('--permission-prompt-tool', 'mcp__perms__approve', '--mcp-config', permissionConfigPath)
+    } else if (mcpConfigPath) {
+      // Ask mode: route remaining permissions through our MCP approval tool,
+      // which surfaces them in Notarise for an Allow/Deny.
+      flags.push('--permission-prompt-tool', 'mcp__perms__approve')
     }
     return flags
   }
@@ -70,7 +85,7 @@ export const runCli = async (
   }
 
   const cli = providerId === 'claude-code' ? 'claude' : 'codex'
-  const inner = `${cli} ${flags.join(' ')} < ${promptPath}`
+  const inner = `${cli} ${flags.join(' ')} < "${promptPath}"`
   const options = await spawnOptions(cwd)
   const command = isWindows()
     ? Command.create('cmd', ['/c', inner], options)
@@ -88,10 +103,16 @@ export const runCli = async (
     }
   }
 
+  let stderr = ''
   command.stdout.on('data', (chunk) => {
     if (!state.cancelled) {
       buffer += decode(chunk)
       drain(false)
+    }
+  })
+  command.stderr.on('data', (chunk) => {
+    if (!state.cancelled) {
+      stderr += decode(chunk)
     }
   })
   command.on('error', (error) => {
@@ -104,8 +125,14 @@ export const runCli = async (
       return
     }
     drain(true)
-    callbacks.onClose((payload as { code: number | null }).code)
+    callbacks.onClose((payload as { code: number | null }).code, stderr)
   })
 
-  state.child = (await command.spawn()) as Child
+  const child = (await command.spawn()) as Child
+  state.child = child
+  // Cancel may have landed while spawn was in flight — kill now, or the process
+  // outlives the turn.
+  if (state.cancelled) {
+    void child.kill().catch(() => undefined)
+  }
 }
