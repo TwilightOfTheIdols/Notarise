@@ -27,11 +27,25 @@ export async function loadDocument(): Promise<NotariseDocument | null> {
     return (await legacyStore.get<NotariseDocument>(LEGACY_DOCUMENT_KEY)) ?? null
   }
 
-  const raw = window.localStorage.getItem(DOCUMENT_KEY)
-  const legacyRaw = window.localStorage.getItem(LEGACY_DOCUMENT_KEY)
-  return raw
-    ? (JSON.parse(raw) as NotariseDocument)
-    : legacyRaw ? (JSON.parse(legacyRaw) as NotariseDocument) : null
+  return (
+    parseStoredDocument(window.localStorage.getItem(DOCUMENT_KEY)) ??
+    parseStoredDocument(window.localStorage.getItem(LEGACY_DOCUMENT_KEY))
+  )
+}
+
+// A corrupt primary blob shouldn't throw past the legacy fallback (or abort
+// the load entirely) — log it and move on.
+function parseStoredDocument(raw: string | null): NotariseDocument | null {
+  if (!raw) {
+    return null
+  }
+
+  try {
+    return JSON.parse(raw) as NotariseDocument
+  } catch (error) {
+    console.error('Ignoring corrupt stored document', error)
+    return null
+  }
 }
 
 export async function saveDocument(document: NotariseDocument): Promise<void> {

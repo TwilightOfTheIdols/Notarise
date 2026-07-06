@@ -307,6 +307,16 @@ export function useCanvasPointer(deps: UseCanvasPointerDeps) {
     }
 
     const handlePointerUp = (event: PointerEvent) => {
+      // The workspace's own pointerup (which consumes the press for
+      // click-to-create) runs first during bubbling; if the pointer was
+      // released outside the workspace it never fires, and a stale press
+      // would long-press-pan with no button held. Clear it here.
+      const press = pressRef.current
+      if (press && event.pointerId === press.pointerId) {
+        window.clearTimeout(press.timer)
+        pressRef.current = null
+      }
+
       finishActiveDrag(event.clientX, event.clientY)
     }
 

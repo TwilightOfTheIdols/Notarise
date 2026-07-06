@@ -20,6 +20,8 @@ type LayerSearchResult = {
   searchableLayer: string
 }
 
+const MAX_CELL_RESULTS = 50
+
 type GlobalSearchProps = {
   cells: CellModel[]
   getLayerTitle: (layer: number) => string
@@ -85,6 +87,7 @@ export function GlobalSearch({ cells, getLayerTitle, onActivate, onResultSelect,
 
         return 0
       })
+      .slice(0, MAX_CELL_RESULTS)
   }, [normalizedQuery, searchIndex])
 
   const layerResults = useMemo<LayerSearchResult[]>(() => {
@@ -162,7 +165,9 @@ export function GlobalSearch({ cells, getLayerTitle, onActivate, onResultSelect,
         !event.metaKey &&
         !event.altKey &&
         event.key.length === 1 &&
-        /^[\w\s]$/u.test(event.key)
+        // Word characters only — a bare space would open the dropdown with a
+        // query that trims to nothing.
+        /^\w$/u.test(event.key)
       ) {
         event.preventDefault()
         onActivate()
