@@ -30,15 +30,21 @@ const summarizeInput = (tool: string, input: unknown): string => {
 
 // While an ask-mode turn runs, relay each pending approval request from the
 // bridge into Notarise's permission UI, then write the decision back.
-const startPermissionPoller = (handlers: AgentTurnHandlers, state: TurnState): (() => void) => {
+const startPermissionPoller = (
+  handlers: AgentTurnHandlers,
+  state: TurnState,
+  bridgeId: string,
+): (() => void) => {
   const handled = new Set<string>()
   let stopped = false
+  let polling = false
+  let activeRequestId: string | null = null
   const stop = () => {
     stopped = true
     window.clearInterval(timer)
   }
   const tick = async () => {
-    if (stopped) {
+    if (stopped || polling || activeRequestId) {
       return
     }
     // A cancelled turn never reaches onClose, so the poller shuts itself down.
@@ -46,75 +52,100 @@ const startPermissionPoller = (handlers: AgentTurnHandlers, state: TurnState): (
       stop()
       return
     }
+    polling = true
     let pending: PermReq[] = []
     try {
-      pending = await invoke<PermReq[]>('agent_perms_pending')
+      pending = await invoke<PermReq[]>('agent_perms_pending', { bridgeId })
     } catch {
       pending = []
+    } finally {
+      polling = false
     }
-    for (const req of pending) {
-      if (handled.has(req.id)) {
-        continue
-      }
-      handled.add(req.id)
-      void handlers
-        .onPermissionRequest({
-          tool: req.tool,
-          title: `Allow ${req.tool}?`,
-          detail: summarizeInput(req.tool, req.input),
-        })
-        .then((decision: PermissionDecision) =>
-          invoke('agent_perms_resolve', {
-            id: req.id,
-            allow: decision === 'allow',
-            message: decision === 'allow' ? null : 'Denied in Notarise',
-          }),
-        )
-        .catch(() => undefined)
+
+    // The UI has one permission card per session. Process requests serially so
+    // parallel CLI tool calls cannot overwrite each other's resolver.
+    const req = pending.find((candidate) => !handled.has(candidate.id))
+    if (!req || stopped || state.cancelled) {
+      return
+    }
+
+    handled.add(req.id)
+    activeRequestId = req.id
+    try {
+      const decision: PermissionDecision = await handlers.onPermissionRequest({
+        tool: req.tool,
+        title: `Allow ${req.tool}?`,
+        detail: summarizeInput(req.tool, req.input),
+      })
+      await invoke('agent_perms_resolve', {
+        bridgeId,
+        id: req.id,
+        allow: decision === 'allow',
+        message: decision === 'allow' ? null : 'Denied in Notarise',
+      })
+    } catch {
+      // A transient IPC/write failure should be retried instead of leaving the
+      // CLI blocked until its 15-minute timeout.
+      handled.delete(req.id)
+    } finally {
+      activeRequestId = null
     }
   }
   const timer = window.setInterval(() => void tick(), 300)
+  void tick()
   return stop
 }
 
 // While a turn runs, execute Notarise MCP tool calls against the live document
 // and write results back for the agent to read.
-const startActionPoller = (state: TurnState): (() => void) => {
+const startActionPoller = (state: TurnState, bridgeId: string): (() => void) => {
   const handled = new Set<string>()
+  const outcomes = new Map<string, ReturnType<typeof runNotariseAction>>()
   let stopped = false
+  let polling = false
   const stop = () => {
     stopped = true
     window.clearInterval(timer)
   }
   const tick = async () => {
-    if (stopped) {
+    if (stopped || polling) {
       return
     }
     if (state.cancelled) {
       stop()
       return
     }
+    polling = true
     let pending: ActionReq[] = []
     try {
-      pending = await invoke<ActionReq[]>('agent_actions_pending')
+      pending = await invoke<ActionReq[]>('agent_actions_pending', { bridgeId })
     } catch {
       pending = []
+    } finally {
+      polling = false
     }
     for (const req of pending) {
       if (handled.has(req.id)) {
         continue
       }
       handled.add(req.id)
-      const outcome = runNotariseAction(req.tool, req.args)
+      // Cache the result before replying. If the IPC write fails, retrying the
+      // response must not execute a mutating action (such as create_cell) twice.
+      const outcome = outcomes.get(req.id) ?? runNotariseAction(req.tool, req.args)
+      outcomes.set(req.id, outcome)
       void invoke('agent_actions_resolve', {
+        bridgeId,
         id: req.id,
         ok: outcome.ok,
         result: outcome.ok ? outcome.result : null,
         error: outcome.ok ? null : outcome.error,
-      }).catch(() => undefined)
+      }).catch(() => {
+        handled.delete(req.id)
+      })
     }
   }
   const timer = window.setInterval(() => void tick(), 200)
+  void tick()
   return stop
 }
 
@@ -224,29 +255,34 @@ type SessionRuntime = {
   // cwd the cliSessionId was created in. Claude stores conversations per
   // directory, so a --resume only works in that same cwd.
   sessionCwd?: string
-  workspaceDir?: string
-  workspaceFiles?: AgentCellFile[]
 }
 const runtimes = new Map<string, SessionRuntime>()
 
 // Notarise document tools available via MCP in every mode. In workspace mode
 // the cell files are the primary edit surface, so steer text edits there; in
 // repo mode there are no cell files, so update_cell is the only way to edit.
-const notariseToolsNote = (useRepo: boolean): string =>
-  ' You also have Notarise tools that act on the live document: mcp__notarise__search, list_layers, ' +
-  'list_cells, get_cell, create_cell, update_cell, create_layer, and goto_layer.' +
-  (useRepo
-    ? " Use them to read the user's Notarise cells, change them (update_cell replaces a cell's text), and navigate."
-    : ' Prefer editing the cell files for text changes; use these tools to search, add cells or layers, and navigate.')
+const notariseToolsNote = (useRepo: boolean, hasTools: boolean): string => {
+  if (!hasTools) {
+    return ''
+  }
 
-const workspacePreamble = (input: AgentTurnInput): string => {
+  return (
+    ' You also have Notarise tools that act on the live document: mcp__notarise__search, list_layers, ' +
+    'list_cells, get_cell, create_cell, update_cell, create_layer, and goto_layer.' +
+    (useRepo
+      ? " Use them to read the user's Notarise cells, change them (update_cell replaces a cell's text), and navigate."
+      : ' Prefer editing the cell files for text changes; use these tools to search, add cells or layers, and navigate.')
+  )
+}
+
+const workspacePreamble = (input: AgentTurnInput, hasTools: boolean): string => {
   const selected = input.context.cell ? `cells/${input.context.cell.id}.md` : null
   return (
     'Your working directory is a copy of the user\'s Notarise document. Each cell is a file at ' +
     'cells/<id>.md — edit those files to change cells. ' +
     (selected ? `The selected cell is ${selected}. ` : '') +
     'See AGENTS.md for the contract.' +
-    notariseToolsNote(false)
+    notariseToolsNote(false, hasTools)
   )
 }
 
@@ -261,11 +297,11 @@ const buildRecap = (history: NonNullable<AgentTurnInput['history']>): string => 
   return `Earlier in this conversation (you are continuing it, context only):\n\n${text}`
 }
 
-const repoPreamble = (input: AgentTurnInput): string => {
+const repoPreamble = (input: AgentTurnInput, hasTools: boolean): string => {
   const note = input.context.cell
     ? 'The user has selected a Notarise cell whose notes/TODOs are below — use them to guide your work.'
     : 'The Notarise context below describes what the user is focused on.'
-  return `Your working directory is the user's project. Make the requested changes directly in the project files. ${note}${notariseToolsNote(true)}`
+  return `Your working directory is the user's project. Make the requested changes directly in the project files. ${note}${notariseToolsNote(true, hasTools)}`
 }
 
 const run = async (input: AgentTurnInput, handlers: AgentTurnHandlers, state: TurnState) => {
@@ -276,40 +312,39 @@ const run = async (input: AgentTurnInput, handlers: AgentTurnHandlers, state: Tu
   runtimes.set(input.sessionId, runtime)
 
   // Full access + a linked project → run in the real repo. Otherwise run in a
-  // throwaway copy of the document (scoped), reused across turns in this session
-  // so edits and the --resume conversation both stay put.
+  // throwaway copy of the document (scoped). It keeps the same path for CLI
+  // conversation continuity, but is refreshed from the live document before
+  // every turn so stale workspace files can never overwrite intervening edits.
   const useRepo = input.settings.mode === 'full' && Boolean(input.settings.projectDir)
   let cwd: string | undefined
   let workspaceFiles: AgentCellFile[] | null = null
   if (useRepo) {
     cwd = input.settings.projectDir as string
-  } else if (runtime.workspaceDir && runtime.workspaceFiles) {
-    cwd = runtime.workspaceDir
-    workspaceFiles = runtime.workspaceFiles
   } else {
-    const workspace = await materializeWorkspace()
+    const workspace = await materializeWorkspace(input.sessionId)
     if (state.cancelled) {
       return
     }
     cwd = workspace.path
     workspaceFiles = workspace.files
-    runtime.workspaceDir = workspace.path
-    runtime.workspaceFiles = workspace.files
   }
 
   // Claude: stand up the MCP servers (notarise actions always; perms approval in
   // ask mode) and poll their request files.
   let mcpConfigPath: string | undefined
+  let activeBridgeId: string | undefined
   let stopActions: (() => void) | null = null
   let stopPerms: (() => void) | null = null
   if (isClaude) {
     const ask = !input.settings.autoApprove
+    const bridgeId = crypto.randomUUID()
     try {
-      const setup = await invoke<{ config_path: string }>('agent_mcp_setup', { ask })
+      const setup = await invoke<{ config_path: string }>('agent_mcp_setup', { ask, bridgeId })
+      activeBridgeId = bridgeId
       mcpConfigPath = setup.config_path
-      stopActions = startActionPoller(state)
+      stopActions = startActionPoller(state, bridgeId)
       if (ask) {
-        stopPerms = startPermissionPoller(handlers, state)
+        stopPerms = startPermissionPoller(handlers, state, bridgeId)
       }
     } catch {
       // setup failed; run without the tool bridge
@@ -318,7 +353,15 @@ const run = async (input: AgentTurnInput, handlers: AgentTurnHandlers, state: Tu
   const stopBridges = () => {
     stopActions?.()
     stopPerms?.()
+    stopActions = null
+    stopPerms = null
+    if (activeBridgeId) {
+      const bridgeId = activeBridgeId
+      activeBridgeId = undefined
+      void invoke('agent_bridge_cleanup', { bridgeId }).catch(() => undefined)
+    }
   }
+  state.cleanup = stopBridges
 
   // A resume id is only valid in the cwd it was created in. If the user switched
   // scope/project, drop it and start a fresh conversation here.
@@ -331,7 +374,7 @@ const run = async (input: AgentTurnInput, handlers: AgentTurnHandlers, state: Tu
   // prior Notarise messages → seed them so context survives the switch.
   const needsRecap = isClaude && !runtime.cliSessionId && (input.history?.length ?? 0) > 0
 
-  const preamble = useRepo ? repoPreamble(input) : workspacePreamble(input)
+  const preamble = useRepo ? repoPreamble(input, isClaude) : workspacePreamble(input, isClaude)
   const promptText = needsRecap
     ? `${preamble}\n\n${buildRecap(input.history!)}\n\n${buildPrompt(input)}`
     : `${preamble}\n\n${buildPrompt(input)}`
@@ -342,9 +385,14 @@ const run = async (input: AgentTurnInput, handlers: AgentTurnHandlers, state: Tu
     stopBridges()
     if (!state.cancelled && workspaceFiles) {
       try {
-        const changed = await collectWorkspace(cwd as string, workspaceFiles)
+        const { changed, conflicts } = await collectWorkspace(cwd as string, workspaceFiles)
         if (changed > 0) {
           handlers.onAssistantDelta(`\n\n_Applied ${changed} cell edit(s) back to the document._`)
+        }
+        if (conflicts > 0) {
+          handlers.onAssistantDelta(
+            `\n\n_Skipped ${conflicts} cell edit(s) because those cells changed in Notarise while the agent was running._`,
+          )
         }
       } catch {
         // collection is best-effort; don't fail the turn over it
@@ -403,6 +451,7 @@ export const cliProvider: AgentProvider = {
     return {
       cancel: () => {
         state.cancelled = true
+        state.cleanup?.()
         state.child?.kill().catch(() => undefined)
       },
     }

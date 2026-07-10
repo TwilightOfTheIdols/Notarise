@@ -27,6 +27,7 @@ import { screenToWorld } from '../store'
 import type { CellModel, StoredCellModel, Viewport } from '../store'
 import type { DragMode, PressState, TextSizeDialState } from '../app/types'
 import type { FontSizeSegment } from '../editorBehaviors'
+import { useStableEvent } from './useStableEvent'
 
 type StorageDragPreview = { boxId: string; x: number; y: number } | null
 
@@ -299,10 +300,48 @@ export function useCanvasPointer(deps: UseCanvasPointerDeps) {
     return true
   }
 
+  const cancelActiveDrag = () => {
+    const drag = dragRef.current
+    if (!drag) {
+      return false
+    }
+
+    dragRef.current = null
+    setDraggedBoxId(null)
+    setIsPanning(false)
+    setIsTrashHot(false)
+    setStorageDragPreview(null)
+    scheduleTextSizeUiHide(0)
+
+    // Never turn a system-level pointer cancellation into a destructive drop.
+    // Restore geometry that was only being previewed by the gesture.
+    if (drag.type === 'box') {
+      updateBox(drag.boxId, { x: drag.boxX, y: drag.boxY })
+      settleCanvasMovement()
+    } else if (drag.type === 'resize') {
+      updateBox(drag.boxId, { width: drag.width, height: drag.height })
+    } else if (drag.type === 'scale') {
+      if (drag.editor && drag.textSegments.length > 0) {
+        applyScaledFontSegments(drag.editor, drag.textSegments, 1)
+      }
+      if (drag.scaleBoxDefault || drag.textSegments.length === 0) {
+        updateBox(drag.boxId, { fontSize: drag.fontSize })
+      }
+    } else if (drag.type === 'canvas') {
+      settleCanvasMovement()
+    }
+
+    return true
+  }
+
+  const moveActiveDragEvent = useStableEvent(moveActiveDrag)
+  const finishActiveDragEvent = useStableEvent(finishActiveDrag)
+  const cancelActiveDragEvent = useStableEvent(cancelActiveDrag)
+
   useEffect(() => {
     const handlePointerMove = (event: PointerEvent) => {
       if (dragRef.current) {
-        moveActiveDrag(event.clientX, event.clientY)
+        moveActiveDragEvent(event.clientX, event.clientY)
       }
     }
 
@@ -317,7 +356,12 @@ export function useCanvasPointer(deps: UseCanvasPointerDeps) {
         pressRef.current = null
       }
 
-      finishActiveDrag(event.clientX, event.clientY)
+      if (event.type === 'pointercancel') {
+        cancelActiveDragEvent()
+        return
+      }
+
+      finishActiveDragEvent(event.clientX, event.clientY)
     }
 
     window.addEventListener('pointermove', handlePointerMove)
@@ -328,8 +372,13 @@ export function useCanvasPointer(deps: UseCanvasPointerDeps) {
       window.removeEventListener('pointermove', handlePointerMove)
       window.removeEventListener('pointerup', handlePointerUp)
       window.removeEventListener('pointercancel', handlePointerUp)
+      if (pressRef.current) {
+        window.clearTimeout(pressRef.current.timer)
+        pressRef.current = null
+      }
+      dragRef.current = null
     }
-  })
+  }, [cancelActiveDragEvent, finishActiveDragEvent, moveActiveDragEvent])
 
   const handleWorkspacePointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
     rememberCanvasPoint(event.clientX, event.clientY)
@@ -402,6 +451,16 @@ export function useCanvasPointer(deps: UseCanvasPointerDeps) {
   }
 
   const handleWorkspacePointerUp = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.type === 'pointercancel') {
+      const press = pressRef.current
+      if (press && press.pointerId === event.pointerId) {
+        window.clearTimeout(press.timer)
+        pressRef.current = null
+      }
+      cancelActiveDrag()
+      return
+    }
+
     if (finishActiveDrag(event.clientX, event.clientY)) {
       return
     }
@@ -576,6 +635,8 @@ export function useCanvasPointer(deps: UseCanvasPointerDeps) {
     zoomAt(getWorkspacePoint(event.clientX, event.clientY), event.deltaY)
   }
 
+  const handleWheelEvent = useStableEvent(handleWheel)
+
   useEffect(() => {
     const editorShell = editorShellRef.current
 
@@ -583,12 +644,12 @@ export function useCanvasPointer(deps: UseCanvasPointerDeps) {
       return
     }
 
-    editorShell.addEventListener('wheel', handleWheel, { passive: false })
+    editorShell.addEventListener('wheel', handleWheelEvent, { passive: false })
 
     return () => {
-      editorShell.removeEventListener('wheel', handleWheel)
+      editorShell.removeEventListener('wheel', handleWheelEvent)
     }
-  })
+  }, [editorShellRef, handleWheelEvent])
 
   useEffect(() => {
     const preventBrowserZoom = (event: WheelEvent) => {

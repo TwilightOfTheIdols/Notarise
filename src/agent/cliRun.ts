@@ -8,7 +8,7 @@ const decode = (chunk: unknown): string =>
   typeof chunk === 'string' ? chunk : new TextDecoder().decode(chunk as Uint8Array)
 
 export type Child = { kill: () => Promise<void> }
-export type TurnState = { cancelled: boolean; child: Child | null }
+export type TurnState = { cancelled: boolean; child: Child | null; cleanup?: () => void }
 
 export type CliCallbacks = {
   onLine: (line: string) => void

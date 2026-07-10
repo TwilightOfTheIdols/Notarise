@@ -715,19 +715,18 @@ function isImageResizeDirection(value: string | undefined): value is ImageResize
 }
 
 function getImageNodePosition(editor: Editor, image: HTMLImageElement): number | null {
-  const src = image.getAttribute('src')
-  let fallbackPosition: number | null = null
-
-  editor.state.doc.descendants((node, position) => {
-    if (node.type.name === 'image' && (!src || node.attrs.src === src)) {
-      fallbackPosition = position
-      return false
+  try {
+    const domPosition = editor.view.posAtDOM(image, 0)
+    for (const position of [domPosition, domPosition - 1]) {
+      if (position >= 0 && editor.state.doc.nodeAt(position)?.type.name === 'image') {
+        return position
+      }
     }
+  } catch {
+    // The image may have been removed while the resize gesture was active.
+  }
 
-    return true
-  })
-
-  return fallbackPosition
+  return null
 }
 
 function calculateZoomCorrectedImageSize(
@@ -778,9 +777,14 @@ export function startImageResizeCorrection(event: MouseEvent, editor: Editor, vi
     correctSize(moveEvent.clientX)
   }
 
-  const handleMouseUp = (upEvent: MouseEvent) => {
+  const cleanup = () => {
     document.removeEventListener('mousemove', handleMouseMove)
     document.removeEventListener('mouseup', handleMouseUp)
+    window.removeEventListener('blur', cleanup)
+  }
+
+  const handleMouseUp = (upEvent: MouseEvent) => {
+    cleanup()
 
     const nextSize = correctSize(upEvent.clientX)
     const position = getImageNodePosition(editor, image)
@@ -804,8 +808,9 @@ export function startImageResizeCorrection(event: MouseEvent, editor: Editor, vi
     )
   }
 
-  window.setTimeout(() => {
-    document.addEventListener('mousemove', handleMouseMove)
-    document.addEventListener('mouseup', handleMouseUp)
-  }, 0)
+  // Register during mousedown so a very fast click-release cannot happen
+  // before the listeners exist and leave a dangling resize handler behind.
+  document.addEventListener('mousemove', handleMouseMove)
+  document.addEventListener('mouseup', handleMouseUp)
+  window.addEventListener('blur', cleanup)
 }

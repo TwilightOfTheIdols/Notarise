@@ -50,9 +50,50 @@ type Persisted = {
   settings: AgentSettings
 }
 
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null
+
+const isProviderId = (value: unknown): value is AgentProviderId =>
+  value === 'claude-code' || value === 'codex'
+
 const loadPersisted = (): Partial<Persisted> => {
   try {
-    return JSON.parse(window.localStorage.getItem(LINK_KEY) ?? '{}') as Partial<Persisted>
+    const parsed: unknown = JSON.parse(window.localStorage.getItem(LINK_KEY) ?? '{}')
+    if (!isRecord(parsed)) {
+      return {}
+    }
+
+    const rawSettings = isRecord(parsed.settings) ? parsed.settings : {}
+    const providerId = isProviderId(rawSettings.providerId)
+      ? rawSettings.providerId
+      : DEFAULT_SETTINGS.providerId
+    const requestedMode = rawSettings.mode === 'full' || rawSettings.mode === 'scoped'
+      ? rawSettings.mode
+      : DEFAULT_SETTINGS.mode
+    const codexAskFallback = providerId === 'codex' && requestedMode === 'full' && rawSettings.autoApprove === false
+    const mode = codexAskFallback ? 'scoped' : requestedMode
+    const model = rawSettings.model === 'opus' || rawSettings.model === 'sonnet' || rawSettings.model === 'haiku'
+      ? rawSettings.model
+      : 'default'
+
+    return {
+      linkedProviderId: parsed.linkedProviderId === null || isProviderId(parsed.linkedProviderId)
+        ? parsed.linkedProviderId
+        : null,
+      settings: {
+        providerId,
+        mode,
+        model: providerId === 'codex' ? 'default' : model,
+        autoApprove: codexAskFallback
+          ? true
+          : typeof rawSettings.autoApprove === 'boolean'
+          ? rawSettings.autoApprove
+          : DEFAULT_SETTINGS.autoApprove,
+        projectDir: typeof rawSettings.projectDir === 'string' || rawSettings.projectDir === null
+          ? rawSettings.projectDir
+          : DEFAULT_SETTINGS.projectDir,
+      },
+    }
   } catch {
     return {}
   }
@@ -275,13 +316,37 @@ export const useAgentStore = create<AgentState>((set, get) => {
     linkProvider: (id) => {
       set((state) => ({
         linkedProviderId: id,
-        settings: { ...state.settings, providerId: id },
+        settings: {
+          ...state.settings,
+          providerId: id,
+          model: id === 'codex' ? 'default' : state.settings.model,
+          // Codex exec has no interactive stdin in this integration, so it
+          // cannot service Notarise's per-edit approval UI.
+          ...(id === 'codex' && state.settings.mode === 'full' && !state.settings.autoApprove
+            ? { mode: 'scoped' as const, autoApprove: true }
+            : {}),
+        },
       }))
       persist()
     },
 
     unlinkProvider: () => {
-      set({ linkedProviderId: null })
+      turnHandles.forEach((handle) => handle.cancel())
+      turnHandles.clear()
+      permissionResolvers.forEach((resolve) => resolve('deny'))
+      permissionResolvers.clear()
+      set((state) => ({
+        linkedProviderId: null,
+        sessions: state.sessions.map((session) => ({
+          ...session,
+          status: 'idle',
+          pendingPermission: null,
+          activity: null,
+          messages: session.messages.map((message) =>
+            message.streaming ? { ...message, streaming: false } : message,
+          ),
+        })),
+      }))
       persist()
     },
 
@@ -311,6 +376,11 @@ export const useAgentStore = create<AgentState>((set, get) => {
         return
       }
 
+      const currentSession = get().sessions.find((session) => session.id === get().activeSessionId)
+      if (currentSession?.status === 'running') {
+        return
+      }
+
       const sessionId = ensureSession()
 
       // Snapshot the conversation so far (before this turn) to seed context if a
@@ -325,6 +395,7 @@ export const useAgentStore = create<AgentState>((set, get) => {
       const assistantId = nextId()
       appendMessage(sessionId, { id: assistantId, role: 'assistant', text: '', streaming: true })
       patchSession(sessionId, { status: 'running', activity: null })
+      let settled = false
 
       const handle = provider.sendTurn(
         { sessionId, text: trimmed, settings: get().settings, context: buildAgentContext(), history },
@@ -341,10 +412,18 @@ export const useAgentStore = create<AgentState>((set, get) => {
             })
           },
           onDone: () => {
+            if (settled) {
+              return
+            }
+            settled = true
             turnHandles.delete(sessionId)
             finishMessage(sessionId, assistantId)
           },
           onError: (message) => {
+            if (settled) {
+              return
+            }
+            settled = true
             turnHandles.delete(sessionId)
             appendToMessage(sessionId, assistantId, `\n[error: ${message}]`)
             finishMessage(sessionId, assistantId)
@@ -361,8 +440,23 @@ export const useAgentStore = create<AgentState>((set, get) => {
       }
       turnHandles.get(sessionId)?.cancel()
       turnHandles.delete(sessionId)
+      permissionResolvers.get(sessionId)?.('deny')
       permissionResolvers.delete(sessionId)
-      patchSession(sessionId, { status: 'idle', pendingPermission: null, activity: null })
+      set((state) => ({
+        sessions: state.sessions.map((session) =>
+          session.id === sessionId
+            ? {
+                ...session,
+                status: 'idle',
+                pendingPermission: null,
+                activity: null,
+                messages: session.messages.map((message) =>
+                  message.streaming ? { ...message, streaming: false } : message,
+                ),
+              }
+            : session,
+        ),
+      }))
     },
 
     resolvePermission: (decision) => {

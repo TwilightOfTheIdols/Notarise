@@ -2226,6 +2226,11 @@ button {
   color: var(--text);
 }
 
+.agent-mode button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 .agent-settings-modes {
   flex-direction: column;
   align-items: stretch;

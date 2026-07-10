@@ -187,10 +187,10 @@ export function LayerRail({
       const rawWheelDelta = Math.abs(event.deltaY) >= Math.abs(event.deltaX) ? event.deltaY : event.deltaX
       const deltaScale = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? scrollElement.clientHeight : 1
 
-      scrollElement.scrollBy({
-        top: rawWheelDelta * deltaScale,
-        behavior: 'smooth',
-      })
+      // Starting a new smooth-scroll animation for every wheel event makes
+      // trackpad input queue up and feel detached. Apply the native delta
+      // directly; the scroll event already schedules the fade update.
+      scrollElement.scrollTop += rawWheelDelta * deltaScale
     }
 
     nav.addEventListener('wheel', handleWheel, { passive: false })

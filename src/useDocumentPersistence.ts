@@ -4,6 +4,19 @@ import { createDocumentSnapshot, useDocumentStore } from './store'
 
 const SAVE_DEBOUNCE_MS = 350
 
+// Store writes are asynchronous. Serialize them across hook lifetimes so an
+// older, slower write can never finish after a newer one and restore stale data.
+let saveChain: Promise<void> = Promise.resolve()
+
+const queueDocumentSave = () => {
+  const snapshot = createDocumentSnapshot(useDocumentStore.getState())
+  saveChain = saveChain
+    .then(() => saveDocument(snapshot))
+    .catch((error) => {
+      console.error('Unable to save document storage', error)
+    })
+}
+
 export function useDocumentPersistence() {
   const hydrateDocument = useDocumentStore((state) => state.hydrateDocument)
 
@@ -23,12 +36,12 @@ export function useDocumentPersistence() {
       }
       if (dirty) {
         dirty = false
-        void saveDocument(createDocumentSnapshot(useDocumentStore.getState()))
+        queueDocumentSave()
       }
     }
 
     const subscribe = () => {
-      unsubscribe = useDocumentStore.subscribe((state) => {
+      unsubscribe = useDocumentStore.subscribe(() => {
         dirty = true
         if (saveTimer !== null) {
           window.clearTimeout(saveTimer)
@@ -36,7 +49,7 @@ export function useDocumentPersistence() {
         saveTimer = window.setTimeout(() => {
           saveTimer = null
           dirty = false
-          void saveDocument(createDocumentSnapshot(state))
+          queueDocumentSave()
         }, SAVE_DEBOUNCE_MS)
       })
     }

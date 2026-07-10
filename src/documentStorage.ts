@@ -16,15 +16,23 @@ const isTauriRuntime = () => {
 export async function loadDocument(): Promise<NotariseDocument | null> {
   if (isTauriRuntime()) {
     const { load } = await import('@tauri-apps/plugin-store')
-    const store = await load(TAURI_STORE_FILE, { autoSave: false, defaults: {} })
-    const document = await store.get<NotariseDocument>(DOCUMENT_KEY)
-
-    if (document) {
-      return document
+    try {
+      const store = await load(TAURI_STORE_FILE, { autoSave: false, defaults: {} })
+      const document = await store.get<NotariseDocument>(DOCUMENT_KEY)
+      if (document) {
+        return document
+      }
+    } catch (error) {
+      console.error('Unable to read primary document store; trying legacy storage', error)
     }
 
-    const legacyStore = await load(LEGACY_TAURI_STORE_FILE, { autoSave: false, defaults: {} })
-    return (await legacyStore.get<NotariseDocument>(LEGACY_DOCUMENT_KEY)) ?? null
+    try {
+      const legacyStore = await load(LEGACY_TAURI_STORE_FILE, { autoSave: false, defaults: {} })
+      return (await legacyStore.get<NotariseDocument>(LEGACY_DOCUMENT_KEY)) ?? null
+    } catch (error) {
+      console.error('Unable to read legacy document store', error)
+      return null
+    }
   }
 
   return (

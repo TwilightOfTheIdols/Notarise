@@ -103,9 +103,18 @@ export function useLayerRailDrag({
       return
     }
 
-    const targetIndex = layerDrag.isDragging ? getLayerDragTargetIndex(layerDrag, event.clientY) : layerDrag.sourceIndex
-    const visualOrder = layerDrag.isDragging ? getLayerDragOrder(layerDrag, targetIndex) : layerDrag.sourceOrder
-    const shouldSelectLayer = !layerDrag.isDragging
+    if (event.type === 'pointercancel') {
+      setLayerDrag(null)
+      return
+    }
+
+    // A fast drag can reach pointerup before React renders the last pointermove
+    // state. Re-evaluate the distance from the event instead of treating it as
+    // a click based on a stale `isDragging` flag.
+    const isDragging = layerDrag.isDragging || Math.abs(event.clientY - layerDrag.startY) >= CLICK_DRIFT
+    const targetIndex = isDragging ? getLayerDragTargetIndex(layerDrag, event.clientY) : layerDrag.sourceIndex
+    const visualOrder = isDragging ? getLayerDragOrder(layerDrag, targetIndex) : layerDrag.sourceOrder
+    const shouldSelectLayer = !isDragging
     setLayerDrag(null)
 
     if (shouldSelectLayer) {

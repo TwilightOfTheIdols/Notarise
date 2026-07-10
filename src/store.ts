@@ -141,6 +141,107 @@ const isRecord = (value: unknown): value is Record<string, unknown> => {
   return typeof value === 'object' && value !== null
 }
 
+const isSafeCellId = (value: unknown): value is string => {
+  return typeof value === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(value)
+}
+
+const finiteNumber = (value: unknown, fallback: number) => {
+  const number = Number(value)
+  return Number.isFinite(number) ? number : fallback
+}
+
+const SUPPORTED_CONTENT_NODES = new Set([
+  'doc',
+  'paragraph',
+  'text',
+  'heading',
+  'bulletList',
+  'orderedList',
+  'listItem',
+  'blockquote',
+  'codeBlock',
+  'hardBreak',
+  'horizontalRule',
+  'image',
+  'taskList',
+  'taskItem',
+])
+const SUPPORTED_CONTENT_MARKS = new Set(['bold', 'italic', 'underline', 'strike', 'code', 'link', 'fontSize'])
+
+const isValidContentNode = (
+  value: unknown,
+  depth = 0,
+  budget = { remaining: 100_000 },
+): value is JSONContent => {
+  if (
+    depth > 100 ||
+    budget.remaining-- <= 0 ||
+    !isRecord(value) ||
+    typeof value.type !== 'string' ||
+    !SUPPORTED_CONTENT_NODES.has(value.type)
+  ) {
+    return false
+  }
+  if (value.type === 'text' && typeof value.text !== 'string') {
+    return false
+  }
+  if (value.attrs !== undefined && !isRecord(value.attrs)) {
+    return false
+  }
+  if (
+    value.marks !== undefined &&
+    (!Array.isArray(value.marks) || value.marks.some((mark) => (
+      !isRecord(mark) || typeof mark.type !== 'string' || !SUPPORTED_CONTENT_MARKS.has(mark.type)
+    )))
+  ) {
+    return false
+  }
+  return value.content === undefined || (
+    Array.isArray(value.content) &&
+    value.content.every((child) => isValidContentNode(child, depth + 1, budget))
+  )
+}
+
+const normalizeContent = (value: unknown): JSONContent => {
+  if (!isValidContentNode(value) || value.type !== 'doc') {
+    return cloneContent(blankContent)
+  }
+
+  return value as JSONContent
+}
+
+const normalizeCell = (value: unknown): CellModel | null => {
+  if (!isRecord(value) || !isSafeCellId(value.id)) {
+    return null
+  }
+
+  return {
+    id: value.id,
+    layer: Math.trunc(clamp(finiteNumber(value.layer, 1), -100_000, 100_000)),
+    x: Math.round(clamp(finiteNumber(value.x, 0), -1_000_000, 1_000_000)),
+    y: Math.round(clamp(finiteNumber(value.y, 0), -1_000_000, 1_000_000)),
+    width: Math.round(clamp(finiteNumber(value.width, DEFAULT_PAGE_WIDTH), 1, 100_000)),
+    height: Math.round(clamp(finiteNumber(value.height, DEFAULT_BOX_HEIGHT), 1, 100_000)),
+    fontSize: Math.round(clamp(finiteNumber(value.fontSize, DEFAULT_FONT_SIZE), 1, 512)),
+    content: normalizeContent(value.content),
+  }
+}
+
+const normalizeLayerTitles = (value: unknown): Record<number, string> => {
+  if (!isRecord(value)) {
+    return {}
+  }
+
+  return Object.entries(value).reduce<Record<number, string>>((titles, [rawLayer, title]) => {
+    const layer = Number(rawLayer)
+    if (!Number.isFinite(layer) || typeof title !== 'string') {
+      return titles
+    }
+    titles[Math.trunc(layer)] = title
+    return titles
+  }, {})
+}
+
 const getJsonFileContent = <T,>(document: NotariseDocumentV2, path: string): T | null => {
   const file = document.files[path]
 
@@ -413,22 +514,13 @@ const createCellFile = (cell: CellModel | StoredCellModel, zOrder: number): Bund
   content: cell.content,
 })
 
-const cellFromBundleFile = (file: BundleCellFile): CellModel => {
+const cellFromBundleFile = (file: BundleCellFile): CellModel | null => {
   const contentText = getContentText(file.content)
   const content = typeof file.plainText === 'string' && file.plainText !== contentText
     ? plainTextToContent(file.plainText)
     : file.content
 
-  return {
-    id: file.id,
-    layer: Number(file.layer),
-    x: Math.round(Number(file.x) || 0),
-    y: Math.round(Number(file.y) || 0),
-    width: Math.max(1, Math.round(Number(file.width) || DEFAULT_PAGE_WIDTH)),
-    height: Math.max(1, Math.round(Number(file.height) || DEFAULT_BOX_HEIGHT)),
-    fontSize: Math.max(1, Math.round(Number(file.fontSize) || DEFAULT_FONT_SIZE)),
-    content,
-  }
+  return normalizeCell({ ...file, content })
 }
 
 const createLegacySnapshot = (state: DocumentState): NotariseDocumentV1 => ({
@@ -652,13 +744,17 @@ const createVirtualFileBundle = (legacy: NotariseDocumentV1): NotariseDocumentV2
 }
 
 const getDocumentFromBundle = (document: NotariseDocumentV2): NotariseDocumentV1 => {
-  const fallback = getJsonFileContent<NotariseDocumentV1>(document, 'app/document.json')
+  const fallbackValue = getJsonFileContent<unknown>(document, 'app/document.json')
 
-  if (!fallback) {
+  if (!fallbackValue) {
     throw new Error('This Notarise bundle is missing app/document.json.')
   }
+  const fallback = normalizeLegacyDocument(fallbackValue)
 
-  const cellIndex = getJsonFileContent<Array<{ jsonPath?: unknown }>>(document, 'indexes/cells.json') ?? []
+  const cellIndexValue = getJsonFileContent<unknown>(document, 'indexes/cells.json')
+  const cellIndex = Array.isArray(cellIndexValue)
+    ? cellIndexValue.filter(isRecord)
+    : []
   const indexedCellPaths = cellIndex
     .map((entry) => entry.jsonPath)
     .filter((path): path is string => typeof path === 'string')
@@ -668,7 +764,8 @@ const getDocumentFromBundle = (document: NotariseDocumentV2): NotariseDocumentV1
   const boxes = cellPaths
     .flatMap((path) => {
       const cellFile = getJsonFileContent<BundleCellFile>(document, path)
-      return cellFile ? [{ cell: cellFromBundleFile(cellFile), zOrder: Number(cellFile.zOrder) || 0 }] : []
+      const cell = cellFile ? cellFromBundleFile(cellFile) : null
+      return cell ? [{ cell, zOrder: Number(cellFile?.zOrder) || 0 }] : []
     })
     .sort((a, b) => a.zOrder - b.zOrder)
     .map(({ cell }) => cell)
@@ -677,6 +774,9 @@ const getDocumentFromBundle = (document: NotariseDocumentV2): NotariseDocumentV1
     .flatMap(([, file]) => {
       const cellFile = file.content as BundleCellFile
       const cell = cellFromBundleFile(cellFile)
+      if (!cell) {
+        return []
+      }
       return [{
         ...cell,
         deletedAt: Number(cellFile.deletedAt) || Date.now(),
@@ -697,16 +797,27 @@ const getDocumentFromBundle = (document: NotariseDocumentV2): NotariseDocumentV1
       }
     }, fallback.layerTitles)
 
-  return {
+  return normalizeLegacyDocument({
     ...fallback,
     boxes: boxes.length > 0 ? boxes : fallback.boxes,
     storage,
     layerTitles,
-  }
+  })
 }
 
 const getRenderableDocument = (document: NotariseDocument): NotariseDocumentV1 => {
-  return document.version === 2 ? getDocumentFromBundle(document) : document
+  if (document.version === 2) {
+    if (
+      document.kind !== 'notarise.virtual-file-bundle' ||
+      !isRecord(document.files) ||
+      Object.values(document.files).some((file) => !isRecord(file))
+    ) {
+      throw new Error('This does not look like a valid Notarise bundle.')
+    }
+    return getDocumentFromBundle(document)
+  }
+
+  return normalizeLegacyDocument(document)
 }
 
 type LegacySettings = Partial<DocumentSettings> & {
@@ -746,6 +857,99 @@ const normalizeSettings = (settings: LegacySettings = {}): DocumentSettings => {
       10,
     ),
   }
+}
+
+const normalizeLegacyDocument = (value: unknown): NotariseDocumentV1 => {
+  if (!isRecord(value) || value.version !== 1 || !Array.isArray(value.boxes)) {
+    throw new Error('This does not look like a valid Notarise document.')
+  }
+
+  const boxes: CellModel[] = []
+  const seenIds = new Set<string>()
+  value.boxes.forEach((candidate) => {
+    const cell = normalizeCell(candidate)
+    if (cell && !seenIds.has(cell.id)) {
+      seenIds.add(cell.id)
+      boxes.push(cell)
+    }
+  })
+
+  const storage: StoredCellModel[] = []
+  if (Array.isArray(value.storage)) {
+    value.storage.forEach((candidate) => {
+      const cell = normalizeCell(candidate)
+      if (!cell || seenIds.has(cell.id)) {
+        return
+      }
+      seenIds.add(cell.id)
+      storage.push({
+        ...cell,
+        deletedAt: finiteNumber(isRecord(candidate) ? candidate.deletedAt : undefined, Date.now()),
+      })
+    })
+  }
+
+  const viewportValue = isRecord(value.viewport) ? value.viewport : {}
+  const layerTitles = normalizeLayerTitles(value.layerTitles)
+  const requestedActiveLayer = Math.trunc(finiteNumber(value.activeLayer, 1))
+  const settingsValue = isRecord(value.settings) ? value.settings as LegacySettings : {}
+
+  return {
+    version: 1,
+    boxes,
+    storage,
+    layerTitles,
+    activeLayer: Math.trunc(clamp(requestedActiveLayer, -100_000, 100_000)),
+    viewport: {
+      x: clamp(finiteNumber(viewportValue.x, 120), -10_000_000, 10_000_000),
+      y: clamp(finiteNumber(viewportValue.y, 96), -10_000_000, 10_000_000),
+      zoom: clamp(finiteNumber(viewportValue.zoom, 1), MIN_ZOOM, MAX_ZOOM),
+    },
+    theme: value.theme === 'dark' ? 'dark' : 'light',
+    settings: normalizeSettings(settingsValue),
+    updatedAt: finiteNumber(value.updatedAt, Date.now()),
+  }
+}
+
+export function assertValidNotariseDocument(value: unknown): asserts value is NotariseDocument {
+  if (!isRecord(value) || (value.version !== 1 && value.version !== 2)) {
+    throw new Error('This does not look like a valid Notarise document.')
+  }
+
+  const assertLegacyCells = (legacy: unknown) => {
+    if (!isRecord(legacy) || legacy.version !== 1 || !Array.isArray(legacy.boxes)) {
+      throw new Error('This does not look like a valid Notarise document.')
+    }
+    const storage = legacy.storage === undefined ? [] : legacy.storage
+    if (!Array.isArray(storage)) {
+      throw new Error('This Notarise document has invalid storage data.')
+    }
+    const cells = [...legacy.boxes, ...storage]
+    const ids = new Set<string>()
+    for (const cell of cells) {
+      if (
+        !isRecord(cell) ||
+        !isSafeCellId(cell.id) ||
+        ids.has(cell.id) ||
+        !isValidContentNode(cell.content) ||
+        cell.content.type !== 'doc'
+      ) {
+        throw new Error('This Notarise document contains an invalid or duplicate cell.')
+      }
+      ids.add(cell.id)
+    }
+  }
+
+  if (value.version === 1) {
+    assertLegacyCells(value)
+  } else if (isRecord(value.files)) {
+    const fallback = value.files['app/document.json']
+    if (isRecord(fallback) && fallback.mediaType === 'application/json') {
+      assertLegacyCells(fallback.content)
+    }
+  }
+
+  getRenderableDocument(value as NotariseDocument)
 }
 
 const removeEmptySelectedCell = (state: DocumentState) => {
@@ -822,12 +1026,12 @@ export const useDocumentStore = create<DocumentState>((set, get) => ({
   },
   createBoxWithContent: (point, content) => {
     const id = nextId()
-    const layer = get().activeLayer
+    const layer = Math.trunc(clamp(finiteNumber(get().activeLayer, 1), -100_000, 100_000))
     const box: CellModel = {
       id,
       layer,
-      x: Math.round(point.x - DEFAULT_TEXT_INSET_X),
-      y: Math.round(point.y - DEFAULT_TEXT_INSET_Y),
+      x: Math.round(clamp(finiteNumber(point.x, 0) - DEFAULT_TEXT_INSET_X, -1_000_000, 1_000_000)),
+      y: Math.round(clamp(finiteNumber(point.y, 0) - DEFAULT_TEXT_INSET_Y, -1_000_000, 1_000_000)),
       width: DEFAULT_PAGE_WIDTH,
       height: DEFAULT_BOX_HEIGHT,
       fontSize: DEFAULT_FONT_SIZE,
@@ -875,7 +1079,23 @@ export const useDocumentStore = create<DocumentState>((set, get) => ({
   },
   updateBox: (id, patch) => {
     set((state) => ({
-      boxes: state.boxes.map((box) => (box.id === id ? { ...box, ...patch } : box)),
+      boxes: state.boxes.map((box) => {
+        if (box.id !== id) {
+          return box
+        }
+
+        const next = { ...box, ...patch, id: box.id }
+        return {
+          ...next,
+          layer: Math.trunc(clamp(finiteNumber(next.layer, box.layer), -100_000, 100_000)),
+          x: Math.round(clamp(finiteNumber(next.x, box.x), -1_000_000, 1_000_000)),
+          y: Math.round(clamp(finiteNumber(next.y, box.y), -1_000_000, 1_000_000)),
+          width: Math.round(clamp(finiteNumber(next.width, box.width), 1, 100_000)),
+          height: Math.round(clamp(finiteNumber(next.height, box.height), 1, 100_000)),
+          fontSize: Math.round(clamp(finiteNumber(next.fontSize, box.fontSize), 1, 512)),
+          content: patch.content ?? box.content,
+        }
+      }),
     }))
   },
   deleteBox: (id) => {
@@ -1028,8 +1248,9 @@ export const useDocumentStore = create<DocumentState>((set, get) => ({
   setViewport: (viewport) => {
     set({
       viewport: {
-        ...viewport,
-        zoom: clamp(viewport.zoom, MIN_ZOOM, MAX_ZOOM),
+        x: finiteNumber(viewport.x, 0),
+        y: finiteNumber(viewport.y, 0),
+        zoom: clamp(finiteNumber(viewport.zoom, 1), MIN_ZOOM, MAX_ZOOM),
       },
     })
   },
@@ -1072,12 +1293,15 @@ export const useDocumentStore = create<DocumentState>((set, get) => ({
     })
   },
   setLayer: (layer) => {
+    if (!Number.isFinite(layer)) {
+      return
+    }
     set((state) => {
       const boxes = removeEmptySelectedCell(state)
 
       return {
         boxes,
-        activeLayer: clampNavigableLayer(layer, state, boxes),
+        activeLayer: clampNavigableLayer(Math.trunc(layer), state, boxes),
         selectedBoxId: null,
       }
     })
@@ -1127,10 +1351,14 @@ export const useDocumentStore = create<DocumentState>((set, get) => ({
     })
   },
   setLayerTitle: (layer, title) => {
+    if (!Number.isFinite(layer)) {
+      return
+    }
+    const normalizedLayer = Math.trunc(clamp(layer, -100_000, 100_000))
     set((state) => ({
       layerTitles: {
         ...state.layerTitles,
-        [layer]: title,
+        [normalizedLayer]: title,
       },
     }))
   },

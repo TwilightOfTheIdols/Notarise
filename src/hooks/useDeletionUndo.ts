@@ -62,7 +62,7 @@ export function useDeletionUndo({ restoreRemovedBox, restoreLayer, focusCellEdit
     return () => {
       window.removeEventListener('keydown', handleUndoDeletedCell, { capture: true })
     }
-  })
+  }, [focusCellEditor, restoreLayer, restoreRemovedBox])
 
   const pushUndo = (action: DeleteUndoAction) => {
     deletedUndoStackRef.current.push(action)

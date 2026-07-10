@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { PointerEvent as ReactPointerEvent } from 'react'
-import { Check, FileText, Plus, Send, ShieldCheck, X } from 'lucide-react'
+import { Check, FileText, Plus, Send, ShieldCheck, Square, X } from 'lucide-react'
 import { useAgentStore } from '../useAgentStore'
 import { AgentOnboarding } from './AgentOnboarding'
 import { buildAgentContext, summarizeContext } from '../agent/context'
@@ -33,41 +33,59 @@ export function AgentPanel() {
   const createSession = useAgentStore((state) => state.createSession)
   const selectSession = useAgentStore((state) => state.selectSession)
   const sendMessage = useAgentStore((state) => state.sendMessage)
+  const cancelTurn = useAgentStore((state) => state.cancelTurn)
   const resolvePermission = useAgentStore((state) => state.resolvePermission)
   const updateSettings = useAgentStore((state) => state.updateSettings)
   const unlinkProvider = useAgentStore((state) => state.unlinkProvider)
 
   const [draft, setDraft] = useState('')
+  const resizeCleanupRef = useRef<(() => void) | null>(null)
 
   // Drag-to-resize the panel from its left edge; width persists across sessions.
   // Clamped on load too — a width saved on a large screen shouldn't swallow a
   // smaller window.
   const [panelWidth, setPanelWidth] = useState<number | null>(() => {
-    const saved = Number(window.localStorage.getItem('notarise.agent.width'))
-    return saved >= 320 ? Math.min(saved, Math.max(320, window.innerWidth - 40)) : null
+    try {
+      const saved = Number(window.localStorage.getItem('notarise.agent.width'))
+      return saved >= 320 ? Math.min(saved, Math.max(320, window.innerWidth - 40)) : null
+    } catch {
+      return null
+    }
   })
+
+  useEffect(() => () => resizeCleanupRef.current?.(), [])
 
   const startResize = (event: ReactPointerEvent) => {
     event.preventDefault()
+    resizeCleanupRef.current?.()
     document.body.style.userSelect = 'none'
     document.body.style.cursor = 'ew-resize'
     const move = (e: PointerEvent) => {
       const max = Math.min(820, window.innerWidth - 40)
       setPanelWidth(Math.min(Math.max(window.innerWidth - e.clientX, 320), max))
     }
-    const up = () => {
+    const cleanup = () => {
       window.removeEventListener('pointermove', move)
       window.removeEventListener('pointerup', up)
       window.removeEventListener('pointercancel', up)
       document.body.style.userSelect = ''
       document.body.style.cursor = ''
+      resizeCleanupRef.current = null
+    }
+    const up = () => {
+      cleanup()
       setPanelWidth((w) => {
         if (w) {
-          window.localStorage.setItem('notarise.agent.width', String(Math.round(w)))
+          try {
+            window.localStorage.setItem('notarise.agent.width', String(Math.round(w)))
+          } catch {
+            // Resizing still works when browser storage is unavailable.
+          }
         }
         return w
       })
     }
+    resizeCleanupRef.current = cleanup
     window.addEventListener('pointermove', move)
     window.addEventListener('pointerup', up)
     window.addEventListener('pointercancel', up)
@@ -101,7 +119,7 @@ export function AgentPanel() {
 
   const submit = () => {
     const text = draft.trim()
-    if (!text) {
+    if (!text || isRunning) {
       return
     }
     sendMessage(text)
@@ -118,7 +136,11 @@ export function AgentPanel() {
         className="agent-resize-handle"
         onPointerDown={startResize}
         onDoubleClick={() => {
-          window.localStorage.removeItem('notarise.agent.width')
+          try {
+            window.localStorage.removeItem('notarise.agent.width')
+          } catch {
+            // Ignore unavailable browser storage.
+          }
           setPanelWidth(null)
         }}
         title="Drag to resize · double-click to reset"
@@ -181,6 +203,8 @@ export function AgentPanel() {
               <button
                 type="button"
                 className={permMode === 'ask' ? 'is-active' : ''}
+                disabled={settings.providerId === 'codex'}
+                title={settings.providerId === 'codex' ? 'Per-edit approval is not supported by Codex exec' : undefined}
                 onClick={() => updateSettings({ mode: 'full', autoApprove: false })}
               >
                 Ask each edit
@@ -307,8 +331,15 @@ export function AgentPanel() {
                 }
               }}
             />
-            <button type="submit" className="agent-send" title="Send" aria-label="Send" disabled={isRunning || !draft.trim()}>
-              <Send size={16} aria-hidden="true" />
+            <button
+              type={isRunning ? 'button' : 'submit'}
+              className="agent-send"
+              title={isRunning ? 'Stop' : 'Send'}
+              aria-label={isRunning ? 'Stop' : 'Send'}
+              disabled={!isRunning && !draft.trim()}
+              onClick={isRunning ? cancelTurn : undefined}
+            >
+              {isRunning ? <Square size={14} fill="currentColor" aria-hidden="true" /> : <Send size={16} aria-hidden="true" />}
             </button>
           </form>
         </>

@@ -23,8 +23,11 @@ export function useDocumentTransfer({
 
     link.href = url
     link.download = `notarise-${stamp}.notarise`
+    link.hidden = true
+    window.document.body.append(link)
     link.click()
-    URL.revokeObjectURL(url)
+    link.remove()
+    window.setTimeout(() => URL.revokeObjectURL(url), 0)
   }
 
   const importDocument = async (file: File) => {

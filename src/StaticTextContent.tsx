@@ -28,6 +28,10 @@ const renderMarks = (node: JSONContent, content: ReactNode): ReactNode => {
       return <em>{markedContent}</em>
     }
 
+    if (mark.type === 'underline' || mark.type === 'link') {
+      return <u>{markedContent}</u>
+    }
+
     if (mark.type === 'strike') {
       return <s>{markedContent}</s>
     }

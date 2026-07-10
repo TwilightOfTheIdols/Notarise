@@ -40,12 +40,14 @@ const layerList = () => {
 
 // Execute one Notarise MCP tool call against the live document store.
 export const runNotariseAction = (tool: string, rawArgs: unknown): ActionResult => {
-  const args = (rawArgs ?? {}) as Record<string, unknown>
+  const args = rawArgs && typeof rawArgs === 'object'
+    ? rawArgs as Record<string, unknown>
+    : {}
   const store = useDocumentStore.getState()
   try {
     switch (tool) {
       case 'search': {
-        const query = String(args.query ?? '').toLowerCase()
+        const query = typeof args.query === 'string' ? args.query.trim().toLowerCase() : ''
         if (!query) {
           return { ok: false, error: 'query is required' }
         }
@@ -59,7 +61,11 @@ export const runNotariseAction = (tool: string, rawArgs: unknown): ActionResult 
       case 'list_layers':
         return { ok: true, result: { layers: layerList() } }
       case 'list_cells': {
-        const layer = args.layer != null ? Number(args.layer) : null
+        const rawLayer = args.layer != null ? Number(args.layer) : null
+        if (rawLayer !== null && !Number.isFinite(rawLayer)) {
+          return { ok: false, error: 'layer must be a number' }
+        }
+        const layer = rawLayer === null ? null : Math.trunc(rawLayer)
         const cells = store.boxes
           .filter((box) => layer == null || box.layer === layer)
           .map((box) => ({ id: box.id, layer: box.layer, title: firstLine(cellTextFromContent(box.content)) }))
@@ -96,27 +102,40 @@ export const runNotariseAction = (tool: string, rawArgs: unknown): ActionResult 
             ? Math.max(...existing) + 1
             : Math.min(...existing) - 1
           : store.activeLayer
+        if (Math.abs(newLayer) > 100_000) {
+          return { ok: false, error: 'layer limit reached' }
+        }
         const title = typeof args.title === 'string' && args.title.trim() ? args.title.trim() : getDefaultLayerTitle()
         store.setLayerTitle(newLayer, title)
         store.setLayer(newLayer)
         return { ok: true, result: { layer: newLayer, title } }
       }
       case 'create_cell': {
-        const text = String(args.text ?? '')
-        if (args.layer != null && Number(args.layer) !== store.activeLayer) {
-          store.setLayer(Number(args.layer))
+        if (typeof args.text !== 'string') {
+          return { ok: false, error: 'text is required' }
+        }
+        const requestedLayer = args.layer == null ? null : Number(args.layer)
+        if (requestedLayer !== null && (!Number.isFinite(requestedLayer) || Math.abs(requestedLayer) > 100_000)) {
+          return { ok: false, error: 'layer must be a number between -100000 and 100000' }
+        }
+        const targetLayer = requestedLayer === null ? null : Math.trunc(requestedLayer)
+        if (targetLayer !== null && targetLayer !== store.activeLayer) {
+          if (!layerList().some((entry) => entry.layer === targetLayer)) {
+            store.setLayerTitle(targetLayer, getDefaultLayerTitle())
+          }
+          store.setLayer(targetLayer)
         }
         const layer = useDocumentStore.getState().activeLayer
         const count = useDocumentStore.getState().boxes.filter((box) => box.layer === layer).length
-        const x = typeof args.x === 'number' ? args.x : 160
-        const y = typeof args.y === 'number' ? args.y : 140 + count * 60
-        const id = store.createBoxWithContent({ x, y }, contentFromCellText(text))
+        const x = typeof args.x === 'number' && Number.isFinite(args.x) ? args.x : 160
+        const y = typeof args.y === 'number' && Number.isFinite(args.y) ? args.y : 140 + count * 60
+        const id = store.createBoxWithContent({ x, y }, contentFromCellText(args.text))
         return { ok: true, result: { id, layer: useDocumentStore.getState().activeLayer } }
       }
       case 'goto_layer': {
-        const layer = Number(args.layer)
-        if (!Number.isFinite(layer)) {
-          return { ok: false, error: 'layer must be a number' }
+        const layer = Math.trunc(Number(args.layer))
+        if (!Number.isFinite(layer) || Math.abs(layer) > 100_000) {
+          return { ok: false, error: 'layer must be a number between -100000 and 100000' }
         }
         store.setLayer(layer)
         return { ok: true, result: { activeLayer: useDocumentStore.getState().activeLayer } }

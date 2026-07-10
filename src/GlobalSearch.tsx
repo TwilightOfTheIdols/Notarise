@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { Search, X } from 'lucide-react'
 import { getContentSummary } from './contentUtils'
 import type { CellModel } from './store'
+import { useStableEvent } from './hooks/useStableEvent'
 
 type SearchResult = {
   cell: CellModel
@@ -36,6 +37,7 @@ export function GlobalSearch({ cells, getLayerTitle, onActivate, onResultSelect,
   const [query, setQuery] = useState('')
   const [isResultsOpen, setIsResultsOpen] = useState(false)
   const normalizedQuery = query.trim().toLocaleLowerCase()
+  const activateSearch = useStableEvent(onActivate)
 
   const searchIndex = useMemo<SearchIndexEntry[]>(() => {
     return cells
@@ -145,7 +147,7 @@ export function GlobalSearch({ cells, getLayerTitle, onActivate, onResultSelect,
 
       if ((event.ctrlKey || event.metaKey) && event.key.toLocaleLowerCase() === 'f') {
         event.preventDefault()
-        onActivate()
+        activateSearch()
         setIsResultsOpen(true)
         inputRef.current?.focus()
         inputRef.current?.select()
@@ -167,10 +169,10 @@ export function GlobalSearch({ cells, getLayerTitle, onActivate, onResultSelect,
         event.key.length === 1 &&
         // Word characters only — a bare space would open the dropdown with a
         // query that trims to nothing.
-        /^\w$/u.test(event.key)
+        /^[\p{L}\p{N}_]$/u.test(event.key)
       ) {
         event.preventDefault()
-        onActivate()
+        activateSearch()
         setQuery(event.key)
         setIsResultsOpen(true)
         window.requestAnimationFrame(() => {
@@ -185,7 +187,7 @@ export function GlobalSearch({ cells, getLayerTitle, onActivate, onResultSelect,
     return () => {
       window.removeEventListener('keydown', handleKeyDown, { capture: true })
     }
-  }, [onActivate])
+  }, [activateSearch])
 
   useEffect(() => {
     const handlePointerDown = (event: PointerEvent) => {

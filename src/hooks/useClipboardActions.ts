@@ -4,6 +4,9 @@ import type { Editor, JSONContent } from '@tiptap/react'
 import { createImageDocumentContent, getImageFilesFromClipboard, readFileAsDataUrl } from '../contentUtils'
 import { screenToWorld } from '../store'
 import type { Viewport } from '../store'
+import { useStableEvent } from './useStableEvent'
+
+const CELL_CLIPBOARD_TYPE = 'application/x-notarise-cell'
 
 type UseClipboardActionsDeps = {
   selectedBoxId: string | null
@@ -51,87 +54,89 @@ export function useClipboardActions({
     focusCellEditor(id)
   }
 
+  const shouldUseCellClipboard = (event: ClipboardEvent) => {
+    if (!selectedBoxId || hasHighlightedText(selectedBoxId)) {
+      return false
+    }
+
+    const target = event.target instanceof HTMLElement ? event.target : null
+    return !target?.closest('input, textarea, select')
+  }
+
+  const duplicateCopiedCell = (sourceId: string) => {
+    const duplicateId = duplicateBox(sourceId)
+
+    if (!duplicateId) {
+      return
+    }
+
+    copiedCellIdRef.current = duplicateId
+    focusCellEditor(duplicateId)
+  }
+
+  const handleCopy = useStableEvent((event: ClipboardEvent) => {
+    if (!shouldUseCellClipboard(event)) {
+      return
+    }
+
+    event.preventDefault()
+    const copiedCellId = selectedBoxId
+
+    if (!copiedCellId) {
+      return
+    }
+
+    copiedCellIdRef.current = copiedCellId
+    event.clipboardData?.setData(CELL_CLIPBOARD_TYPE, copiedCellId)
+    event.clipboardData?.setData('text/plain', '')
+  })
+
+  const handlePaste = (event: ClipboardEvent) => {
+    const files = getImageFilesFromClipboard(event)
+
+    if (files.length === 0) {
+      return
+    }
+
+    event.preventDefault()
+
+    if (selectedBoxId) {
+      const editor = getEditor(selectedBoxId)
+
+      if (editor) {
+        void insertImagesIntoEditor(editor, files).catch((error) => {
+          console.error('Unable to paste image into cell', error)
+        })
+        return
+      }
+    }
+
+    void createImageBoxAtCursor(files).catch((error) => {
+      console.error('Unable to create image cell', error)
+    })
+  }
+
+  const handleCellPaste = (event: ClipboardEvent) => {
+    const copiedCellId = event.clipboardData?.getData(CELL_CLIPBOARD_TYPE)
+
+    if (!copiedCellId || !shouldUseCellClipboard(event)) {
+      return false
+    }
+
+    event.preventDefault()
+    duplicateCopiedCell(copiedCellIdRef.current ?? copiedCellId)
+    return true
+  }
+
+  const handleClipboardPaste = useStableEvent((event: ClipboardEvent) => {
+    if (handleCellPaste(event)) {
+      return
+    }
+
+    handlePaste(event)
+  })
+
   useEffect(() => {
-    const cellClipboardType = 'application/x-notarise-cell'
-
-    const shouldUseCellClipboard = (event: ClipboardEvent) => {
-      if (!selectedBoxId || hasHighlightedText(selectedBoxId)) {
-        return false
-      }
-
-      const target = event.target instanceof HTMLElement ? event.target : null
-      return !target?.closest('input, textarea, select')
-    }
-
-    const duplicateCopiedCell = (sourceId: string) => {
-      const duplicateId = duplicateBox(sourceId)
-
-      if (!duplicateId) {
-        return
-      }
-
-      copiedCellIdRef.current = duplicateId
-      focusCellEditor(duplicateId)
-    }
-
-    const handleCopy = (event: ClipboardEvent) => {
-      if (!shouldUseCellClipboard(event)) {
-        return
-      }
-
-      event.preventDefault()
-      const copiedCellId = selectedBoxId
-
-      if (!copiedCellId) {
-        return
-      }
-
-      copiedCellIdRef.current = copiedCellId
-      event.clipboardData?.setData(cellClipboardType, copiedCellId)
-      event.clipboardData?.setData('text/plain', '')
-    }
-
-    const handlePaste = (event: ClipboardEvent) => {
-      const files = getImageFilesFromClipboard(event)
-
-      if (files.length === 0) {
-        return
-      }
-
-      event.preventDefault()
-
-      if (selectedBoxId) {
-        const editor = getEditor(selectedBoxId)
-
-        if (editor) {
-          void insertImagesIntoEditor(editor, files)
-          return
-        }
-      }
-
-      void createImageBoxAtCursor(files)
-    }
-
-    const handleCellPaste = (event: ClipboardEvent) => {
-      const copiedCellId = event.clipboardData?.getData(cellClipboardType)
-
-      if (!copiedCellId || !shouldUseCellClipboard(event)) {
-        return false
-      }
-
-      event.preventDefault()
-      duplicateCopiedCell(copiedCellIdRef.current ?? copiedCellId)
-      return true
-    }
-
-    const handleClipboardPaste = (event: ClipboardEvent) => {
-      if (handleCellPaste(event)) {
-        return
-      }
-
-      handlePaste(event)
-    }
-
     window.addEventListener('copy', handleCopy)
     window.addEventListener('paste', handleClipboardPaste)
 
@@ -139,5 +144,5 @@ export function useClipboardActions({
       window.removeEventListener('copy', handleCopy)
       window.removeEventListener('paste', handleClipboardPaste)
     }
-  })
+  }, [handleClipboardPaste, handleCopy])
 }

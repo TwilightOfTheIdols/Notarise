@@ -21,17 +21,29 @@ fn workspace_root(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
+fn workspace_dir(app: &tauri::AppHandle, workspace_id: &str) -> Result<PathBuf, String> {
+    if !safe_id(workspace_id) {
+        return Err("invalid workspace id".to_string());
+    }
+
+    Ok(workspace_root(app)?.join(workspace_id))
+}
+
 fn safe_id(id: &str) -> bool {
     !id.is_empty()
-        && !id.contains('/')
-        && !id.contains('\\')
-        && !id.contains("..")
         && id.len() <= 128
+        && id
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
 }
 
 #[tauri::command]
-fn agent_materialize(app: tauri::AppHandle, cells: Vec<CellFile>) -> Result<String, String> {
-    let root = workspace_root(&app)?;
+fn agent_materialize(
+    app: tauri::AppHandle,
+    workspace_id: String,
+    cells: Vec<CellFile>,
+) -> Result<String, String> {
+    let root = workspace_dir(&app, &workspace_id)?;
     let _ = fs::remove_dir_all(&root);
     let cells_dir = root.join("cells");
     fs::create_dir_all(&cells_dir).map_err(|e| e.to_string())?;
@@ -296,13 +308,21 @@ fn find_node() -> String {
     exe.to_string()
 }
 
-fn perms_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+fn perms_root(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     let dir = app
         .path()
         .app_local_data_dir()
         .map_err(|e| e.to_string())?
         .join("agent-perms");
     Ok(dir)
+}
+
+fn bridge_dir(app: &tauri::AppHandle, bridge_id: &str) -> Result<PathBuf, String> {
+    if !safe_id(bridge_id) {
+        return Err("invalid bridge id".to_string());
+    }
+
+    Ok(perms_root(app)?.join(bridge_id))
 }
 
 // Write via temp file + rename so the bridge server (which polls with a bare
@@ -323,8 +343,12 @@ struct McpSetup {
 // is always included; the `perms` approval server only when `ask` (ask-each-edit
 // mode). Clears stale request/response files from a previous run.
 #[tauri::command]
-fn agent_mcp_setup(app: tauri::AppHandle, ask: bool) -> Result<McpSetup, String> {
-    let dir = perms_dir(&app)?;
+fn agent_mcp_setup(
+    app: tauri::AppHandle,
+    ask: bool,
+    bridge_id: String,
+) -> Result<McpSetup, String> {
+    let dir = bridge_dir(&app, &bridge_id)?;
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
 
     if let Ok(entries) = fs::read_dir(&dir) {
@@ -381,6 +405,16 @@ fn agent_mcp_setup(app: tauri::AppHandle, ask: bool) -> Result<McpSetup, String>
     })
 }
 
+#[tauri::command]
+fn agent_bridge_cleanup(app: tauri::AppHandle, bridge_id: String) -> Result<(), String> {
+    let dir = bridge_dir(&app, &bridge_id)?;
+    match fs::remove_dir_all(dir) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
 #[derive(Serialize)]
 struct PermReq {
     id: String,
@@ -389,8 +423,8 @@ struct PermReq {
 }
 
 #[tauri::command]
-fn agent_perms_pending(app: tauri::AppHandle) -> Result<Vec<PermReq>, String> {
-    let dir = perms_dir(&app)?;
+fn agent_perms_pending(app: tauri::AppHandle, bridge_id: String) -> Result<Vec<PermReq>, String> {
+    let dir = bridge_dir(&app, &bridge_id)?;
     let mut out = Vec::new();
     if let Ok(entries) = fs::read_dir(&dir) {
         for entry in entries.flatten() {
@@ -404,7 +438,11 @@ fn agent_perms_pending(app: tauri::AppHandle) -> Result<Vec<PermReq>, String> {
             }
             if let Ok(text) = fs::read_to_string(&path) {
                 if let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) {
-                    let id = value.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let id = value
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
                     if !safe_id(&id) {
                         continue;
                     }
@@ -413,7 +451,10 @@ fn agent_perms_pending(app: tauri::AppHandle) -> Result<Vec<PermReq>, String> {
                         .and_then(|v| v.as_str())
                         .unwrap_or("tool")
                         .to_string();
-                    let input = value.get("input").cloned().unwrap_or(serde_json::Value::Null);
+                    let input = value
+                        .get("input")
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null);
                     out.push(PermReq { id, tool, input });
                 }
             }
@@ -425,6 +466,7 @@ fn agent_perms_pending(app: tauri::AppHandle) -> Result<Vec<PermReq>, String> {
 #[tauri::command]
 fn agent_perms_resolve(
     app: tauri::AppHandle,
+    bridge_id: String,
     id: String,
     allow: bool,
     message: Option<String>,
@@ -432,7 +474,7 @@ fn agent_perms_resolve(
     if !safe_id(&id) {
         return Err("invalid id".to_string());
     }
-    let dir = perms_dir(&app)?;
+    let dir = bridge_dir(&app, &bridge_id)?;
     let res = serde_json::json!({ "allow": allow, "message": message });
     write_atomic(
         &dir.join(format!("res-{}.json", id)),
@@ -449,8 +491,11 @@ struct ActionReq {
 }
 
 #[tauri::command]
-fn agent_actions_pending(app: tauri::AppHandle) -> Result<Vec<ActionReq>, String> {
-    let dir = perms_dir(&app)?;
+fn agent_actions_pending(
+    app: tauri::AppHandle,
+    bridge_id: String,
+) -> Result<Vec<ActionReq>, String> {
+    let dir = bridge_dir(&app, &bridge_id)?;
     let mut out = Vec::new();
     if let Ok(entries) = fs::read_dir(&dir) {
         for entry in entries.flatten() {
@@ -464,7 +509,11 @@ fn agent_actions_pending(app: tauri::AppHandle) -> Result<Vec<ActionReq>, String
             }
             if let Ok(text) = fs::read_to_string(&path) {
                 if let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) {
-                    let id = value.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let id = value
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
                     if !safe_id(&id) {
                         continue;
                     }
@@ -473,7 +522,10 @@ fn agent_actions_pending(app: tauri::AppHandle) -> Result<Vec<ActionReq>, String
                         .and_then(|v| v.as_str())
                         .unwrap_or("")
                         .to_string();
-                    let args = value.get("args").cloned().unwrap_or(serde_json::Value::Null);
+                    let args = value
+                        .get("args")
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null);
                     out.push(ActionReq { id, tool, args });
                 }
             }
@@ -485,6 +537,7 @@ fn agent_actions_pending(app: tauri::AppHandle) -> Result<Vec<ActionReq>, String
 #[tauri::command]
 fn agent_actions_resolve(
     app: tauri::AppHandle,
+    bridge_id: String,
     id: String,
     ok: bool,
     result: Option<serde_json::Value>,
@@ -493,7 +546,7 @@ fn agent_actions_resolve(
     if !safe_id(&id) {
         return Err("invalid id".to_string());
     }
-    let dir = perms_dir(&app)?;
+    let dir = bridge_dir(&app, &bridge_id)?;
     let res = serde_json::json!({ "ok": ok, "result": result, "error": error });
     write_atomic(
         &dir.join(format!("act-res-{}.json", id)),
@@ -502,8 +555,13 @@ fn agent_actions_resolve(
 }
 
 #[tauri::command]
-fn agent_collect(path: String) -> Result<Vec<CellFile>, String> {
-    let cells_dir = PathBuf::from(&path).join("cells");
+fn agent_collect(app: tauri::AppHandle, path: String) -> Result<Vec<CellFile>, String> {
+    let root = fs::canonicalize(workspace_root(&app)?).map_err(|e| e.to_string())?;
+    let requested = fs::canonicalize(PathBuf::from(&path)).map_err(|e| e.to_string())?;
+    if !requested.starts_with(&root) || requested == root {
+        return Err("workspace path is outside the agent workspace".to_string());
+    }
+    let cells_dir = requested.join("cells");
     let mut out = Vec::new();
 
     let entries = match fs::read_dir(&cells_dir) {
@@ -540,6 +598,7 @@ pub fn run() {
             agent_write_prompt,
             agent_collect,
             agent_mcp_setup,
+            agent_bridge_cleanup,
             agent_perms_pending,
             agent_perms_resolve,
             agent_actions_pending,
@@ -557,4 +616,30 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::safe_id;
+
+    #[test]
+    fn safe_ids_allow_generated_identifiers() {
+        assert!(safe_id("agent-1234_abcd"));
+        assert!(safe_id("550e8400-e29b-41d4-a716-446655440000"));
+    }
+
+    #[test]
+    fn safe_ids_reject_paths_and_shell_metacharacters() {
+        for id in [
+            "",
+            ".",
+            "../cell",
+            "cell/name",
+            "cell\\name",
+            "cell:1",
+            "cell\"quote",
+        ] {
+            assert!(!safe_id(id), "expected {id:?} to be rejected");
+        }
+    }
 }
